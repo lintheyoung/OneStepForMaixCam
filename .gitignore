@@ -1,0 +1,8 @@
+# 忽略所有内容
+*
+
+# 但是，不要忽略 app.py
+!app.py
+
+# 也不要忽略 .gitignore 文件本身 (这是一个好习惯)
+!.gitignore
