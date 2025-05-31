@@ -778,9 +778,14 @@ def run_model_conversion(model_path, format="onnx", opset=18):
             
             # 确保模型路径正确 (相对路径转为docker容器内路径)
             docker_model_path = model_path.replace(outputs_path, "/workspace/outputs").replace("\\", "/")
+
+            # 定义期望的图像尺寸
+            # 符合MaixCam的尺寸
+            imgsz_height = 224
+            imgsz_width = 320
             
             # Docker命令，使用用户设置的参数
-            docker_command = f'''docker run --gpus all --name yolo-export-{conversion_name} --rm --shm-size=4g -v "{data_path}:/workspace/data" -v "{models_path}:/workspace/models" -v "{outputs_path}:/workspace/outputs" yolov11-trainer:latest bash -c "yolo export model={docker_model_path} format={format} opset={opset} batch=1"'''
+            docker_command = f'''docker run --gpus all --name yolo-export-{conversion_name} --rm --shm-size=4g -v "{data_path}:/workspace/data" -v "{models_path}:/workspace/models" -v "{outputs_path}:/workspace/outputs" yolov11-trainer:latest bash -c "yolo export model={docker_model_path} format={format} imgsz={imgsz_height},{imgsz_width} opset={opset} batch=1"'''
             
             # 启动进程 - 明确指定UTF-8编码
             process = subprocess.Popen(
@@ -1191,9 +1196,9 @@ def display_results():
                         file_size = os.path.getsize(weight_path) / (1024 * 1024)  # MB
                         st.write(f"📁 {weight_file} ({file_size:.1f} MB)")
         else:
-            st.info("暂无训练结果")
+            st.info("暂无训练结果（可以刷新一下）")
     else:
-        st.info("暂无训练结果")
+        st.info("暂无训练结果（可以刷新一下）")
 
 def dataset_management_section():
     """数据集管理部分"""
