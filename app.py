@@ -2159,6 +2159,208 @@ device=0                 # 使用第一个GPU设备
             else:
                 st.info("transfer目录不存在")
 
+# ==================== Docker环境检查函数 (示例修改) ====================
+
+def check_docker_environment(messages_list): # 新增 messages_list 参数
+    """检查Docker环境是否可用"""
+    try:
+        messages_list.append("🔍 检查Docker环境...")
+
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'
+
+        result = subprocess.run(['docker', '--version'],
+                              capture_output=True, text=True, timeout=10,
+                              encoding='utf-8', errors='replace', env=env)
+        if result.returncode != 0:
+            messages_list.append("❌ Docker未安装或无法访问")
+            messages_list.append("请安装Docker: https://docs.docker.com/get-docker/")
+            return False
+
+        messages_list.append(f"✅ Docker已安装: {result.stdout.strip()}")
+
+        result = subprocess.run(['docker', 'info'],
+                              capture_output=True, text=True, timeout=10,
+                              encoding='utf-8', errors='replace', env=env)
+        if result.returncode != 0:
+            messages_list.append("❌ Docker服务未运行")
+            messages_list.append("请启动Docker服务")
+            return False
+
+        messages_list.append("✅ Docker服务正在运行")
+
+        if not check_docker_permissions(messages_list): # 传递 messages_list
+            return False
+
+        return True
+
+    except subprocess.TimeoutExpired:
+        messages_list.append("❌ Docker命令超时，请检查Docker是否正常运行")
+        return False
+    except FileNotFoundError:
+        messages_list.append("❌ 未找到Docker命令，请确认Docker已正确安装")
+        return False
+    except Exception as e:
+        messages_list.append(f"❌ 检查Docker环境时发生错误: {str(e)}")
+        return False
+
+def check_docker_permissions(messages_list): # 新增 messages_list 参数
+    """检查Docker权限（Linux特有问题）"""
+    try:
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'
+
+        result = subprocess.run(['docker', 'ps'],
+                              capture_output=True, text=True, timeout=10,
+                              encoding='utf-8', errors='replace', env=env)
+        if result.returncode != 0:
+            if "permission denied" in result.stderr.lower():
+                messages_list.append("❌ Docker权限不足，请运行:")
+                messages_list.append("  sudo usermod -aG docker $USER")
+                messages_list.append("  然后重新登录或重启系统")
+                messages_list.append("  或者使用sudo运行此应用")
+                return False
+            else:
+                messages_list.append(f"❌ Docker命令执行失败: {result.stderr}")
+                return False
+
+        messages_list.append("✅ Docker权限检查通过")
+        return True
+    except Exception as e:
+        messages_list.append(f"❌ 检查Docker权限时发生错误: {e}")
+        return False
+
+def check_nvidia_docker(messages_list): # 新增 messages_list 参数
+    """检查NVIDIA Docker支持"""
+    try:
+        messages_list.append("🔍 检查NVIDIA Docker支持...")
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'
+        result = subprocess.run([
+            'docker', 'run', '--rm', '--gpus', 'all',
+            'nvidia/cuda:11.8-base-ubuntu20.04', 'nvidia-smi'
+        ], capture_output=True, text=True, timeout=30,
+           encoding='utf-8', errors='replace', env=env)
+        if result.returncode == 0:
+            messages_list.append("✅ NVIDIA Docker支持正常")
+            return True
+        else:
+            messages_list.append("⚠️ NVIDIA Docker支持不可用，将使用CPU训练")
+            return False # 通常这不应阻止环境初始化成功，除非GPU是强制的
+    except Exception as e:
+        messages_list.append(f"⚠️ 检查NVIDIA Docker时出错: {e}")
+        return False # 同上
+
+def check_docker_image_exists(image_name, messages_list): # 新增 messages_list 参数
+    """检查Docker镜像是否存在"""
+    try:
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'
+        result = subprocess.run(['docker', 'images', '-q', image_name],
+                              capture_output=True, text=True, timeout=30,
+                              encoding='utf-8', errors='replace', env=env)
+        return result.returncode == 0 and result.stdout.strip() != ""
+    except Exception as e:
+        messages_list.append(f"❌ 检查镜像 {image_name} 时发生错误: {str(e)}")
+        return False
+
+def pull_docker_image(image_name, messages_list): # 新增 messages_list 参数
+    """拉取Docker镜像"""
+    try:
+        messages_list.append(f"📥 正在下载Docker镜像: {image_name}")
+        messages_list.append("这可能需要几分钟时间，请耐心等待...")
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'
+        # 注意：Streamlit中直接用subprocess.run可能无法很好地实时更新UI进度条
+        # 可以考虑简化这里的输出，或者后续优化为更复杂的进度反馈
+        process = subprocess.Popen(['docker', 'pull', image_name],
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, encoding='utf-8', errors='replace', env=env)
+        for line in iter(process.stdout.readline, ''):
+            if line.strip(): # 只添加有内容的行
+                messages_list.append(f"   {line.strip()}") # 添加缩进以便区分
+        process.wait() # 等待命令完成
+        if process.returncode == 0:
+            messages_list.append(f"✅ 镜像下载成功: {image_name}")
+            return True
+        else:
+            messages_list.append(f"❌ 镜像下载失败: {image_name}")
+            # messages_list.append(f"错误信息: {process.stderr.read() if process.stderr else 'N/A'}") # Popen stderr might be tricky here
+            return False
+    except subprocess.TimeoutExpired:
+        messages_list.append(f"❌ 下载镜像 {image_name} 超时")
+        return False
+    except Exception as e:
+        messages_list.append(f"❌ 下载镜像 {image_name} 时发生错误: {str(e)}")
+        return False
+
+def check_and_pull_docker_images(messages_list): # 新增 messages_list 参数
+    """检查并下载所需的Docker镜像"""
+    messages_list.append("🔍 检查所需的Docker镜像...")
+    missing_images = []
+    all_successful = True
+
+    for image in REQUIRED_DOCKER_IMAGES:
+        if check_docker_image_exists(image, messages_list): # 传递 messages_list
+            messages_list.append(f"✅ 镜像已存在: {image}")
+        else:
+            messages_list.append(f"⚠️  镜像不存在: {image}")
+            missing_images.append(image)
+
+    if missing_images:
+        messages_list.append(f"\n📥 需要下载 {len(missing_images)} 个镜像...")
+        for image in missing_images:
+            if not pull_docker_image(image, messages_list): # 传递 messages_list
+                messages_list.append(f"❌ 无法下载镜像: {image}")
+                all_successful = False # 标记下载失败
+                # return False # 如果一个失败就整体失败
+    if not all_successful:
+        return False
+
+    messages_list.append("✅ 所有Docker镜像检查完成")
+    return True
+
+def initialize_environment(): # 修改返回类型
+    """初始化环境检查"""
+    messages = [] # 用于收集所有消息
+    platform_info = get_platform_info()
+
+    messages.append("=" * 50)
+    messages.append("🚀 MaixCam YOLOv11训练平台 - 环境初始化")
+    messages.append("=" * 50)
+    messages.append(f"🖥️  操作系统: {platform_info['system']} ({platform_info['machine']})")
+
+    required_dirs = ["data", "models", "outputs", "transfer"]
+    for dir_name in required_dirs:
+        if not create_directory_safe(dir_name): # 假设 create_directory_safe 内部处理打印或也改为返回消息
+            messages.append(f"❌ 创建目录失败: {dir_name}")
+            # return False, messages # 如果创建目录是关键失败点
+
+    if not check_docker_environment(messages): # 传递 messages
+        messages.append("❌ Docker环境检查失败，程序可能无法正常运行")
+        return False, messages
+
+    if platform_info['is_linux']:
+        check_nvidia_docker(messages) # 传递 messages
+
+    if not check_and_pull_docker_images(messages): # 传递 messages
+        messages.append("❌ Docker镜像准备失败，程序可能无法正常运行")
+        return False, messages
+
+    messages.append("✅ 环境初始化完成，程序已准备就绪")
+    messages.append("=" * 50)
+    return True, messages
+
 def main():
     """主应用程序"""
     st.set_page_config(
@@ -2166,29 +2368,79 @@ def main():
         page_icon="🧪",
         layout="wide"
     )
-    
+
+    # 初始化 session_state 中的标志位 (仅当它们不存在时)
+    if 'env_init_attempted' not in st.session_state:
+        st.session_state.env_init_attempted = False
+    if 'env_init_succeeded' not in st.session_state:
+        st.session_state.env_init_succeeded = False
+    if 'env_init_messages' not in st.session_state:
+        st.session_state.env_init_messages = []
+
+    # 执行环境初始化 (仅当尚未成功尝试过)
+    # 这个逻辑保证了每次页面刷新（如果初始化失败）或应用重启都会尝试
+    if not st.session_state.get('env_init_succeeded', False):
+        # 检查是否已尝试过但失败了，如果是，则重置消息列表以显示新的尝试
+        if st.session_state.get('env_init_attempted', False) and not st.session_state.get('env_init_succeeded', False):
+             st.session_state.env_init_messages = [] # 清空旧消息，准备显示新尝试的消息
+
+        with st.spinner("🚀 系统正在进行环境初始化，请稍候..."):
+            succeeded, messages = initialize_environment() # 调用修改后的函数
+            st.session_state.env_init_succeeded = succeeded
+            st.session_state.env_init_messages.extend(messages)
+            st.session_state.env_init_attempted = True # 标记已尝试
+            # 初始化完成后，强制 Streamlit 重新运行一次脚本以更新UI状态
+            # 避免 spinner 卡住或消息未及时显示
+            if 'env_init_just_completed' not in st.session_state:
+                st.session_state.env_init_just_completed = True
+                st.rerun()
+
+    # 清理 env_init_just_completed 标志，防止无限 rerun
+    if 'env_init_just_completed' in st.session_state:
+        del st.session_state.env_init_just_completed
+
+
     st.title("🧪 MaixCam的YOLOv11训练平台")
     st.markdown("支持数据集上传/下载、参数设置、模型转换和MaixCam CviModel生成的增强版训练平台")
-    
-    # 显示平台信息
+
+    # 在侧边栏或应用顶部显示初始化状态
+    if st.session_state.env_init_messages:
+        with st.expander("环境初始化日志", expanded=not st.session_state.env_init_succeeded):
+            for msg in st.session_state.env_init_messages:
+                if "✅" in msg:
+                    st.success(msg) # 或者 st.write(f"✅ {msg}")
+                elif "❌" in msg or "⚠️" in msg:
+                    st.warning(msg) # 或者 st.write(f"⚠️ {msg}")
+                elif "🚀" in msg or "📥" in msg or "🔍" in msg:
+                    st.info(msg)
+                else: # 对于普通消息或分隔符
+                    st.text(msg)
+        if st.session_state.env_init_succeeded:
+            st.sidebar.success("✅ 环境初始化成功！")
+        else:
+            st.sidebar.error("❌ 环境初始化失败！部分功能可能受限。")
+
+
+    # 显示平台信息 (可以保留或移到初始化日志中)
     platform_info = get_platform_info()
     st.sidebar.markdown(f"**系统信息:**")
     st.sidebar.info(f"操作系统: {platform_info['system']}")
     st.sidebar.info(f"架构: {platform_info['machine']}")
-    
-    # 初始化
-    init_status()
+
+    # 初始化状态文件
+    init_status() # 这个函数内部没有print，是安全的
     current_status = get_status()
-    
+
     # 主要内容区域
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📦 数据集管理", "🚀 训练控制", "📺 实时输出", "📊 训练结果", "📤 转换pt为MaixCam模型"])
-    
+
+    # ... (tab 内容不变) ...
     with tab1:
         dataset_management_section()
-    
+
     with tab2:
         st.subheader("🚀 训练控制")
-        
+
         # 状态显示
         status_icons = {
             "idle": "⚪ 待机中",
@@ -2198,15 +2450,13 @@ def main():
             "failed": "❌ 训练失败",
             "stopped": "⏹️ 已停止"
         }
-        
+
         status_text = status_icons.get(current_status["status"], current_status["status"])
         st.write(f"**当前状态:** {status_text}")
-        
+
         # 添加训练参数设置
         st.markdown("### ⚙️ 训练参数设置")
-        
-        # 模型选择
-        # "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"，暂时只是支持yolo11n
+
         model_options = ["yolo11n.pt"]
         selected_model = st.selectbox(
             "选择模型:",
@@ -2214,8 +2464,7 @@ def main():
             index=0,
             help="选择YOLOv11模型版本，n(nano)最小，x(xlarge)最大"
         )
-        
-        # Epoch设置
+
         epochs = st.slider(
             "训练轮数 (Epochs):",
             min_value=5,
@@ -2224,8 +2473,7 @@ def main():
             step=5,
             help="训练循环的总轮数，更多的轮数可能获得更好的结果，但训练时间更长"
         )
-        
-        # 图片尺寸设置
+
         img_size_options = [320, 416, 512, 640, 768, 896, 1024, 1280]
         selected_img_size = st.select_slider(
             "图片尺寸 (Image Size):",
@@ -2233,28 +2481,30 @@ def main():
             value=640,
             help="训练图片尺寸，更大的尺寸可能提高准确率，但会增加显存需求和训练时间"
         )
-        
-        # 高级参数
+
         with st.expander("高级参数设置"):
             st.markdown("以下是当前固定的高级参数，将在未来版本中开放设置")
             st.code("""
-batch=16                 # 批次大小
-patience=50              # 早停耐心值
-optimizer='auto'         # 优化器
-lr0=0.01                 # 初始学习率
-cos_lr=True              # 是否使用余弦学习率调度
-weight_decay=0.0005      # 权重衰减
-dropout=0.0              # 丢弃率
-label_smoothing=0.0      # 标签平滑
-""", language="bash")
-        
-        # 控制按钮
+    batch=16                 # 批次大小
+    patience=50              # 早停耐心值
+    optimizer='auto'         # 优化器
+    lr0=0.01                 # 初始学习率
+    cos_lr=True              # 是否使用余弦学习率调度
+    weight_decay=0.0005      # 权重衰减
+    dropout=0.0              # 丢弃率
+    label_smoothing=0.0      # 标签平滑
+    """, language="bash")
+
         col1, col2, col3, col4 = st.columns(4)
-        
+
         with col1:
-            if current_status["status"] in ["idle", "completed", "failed", "stopped"]:
+            # 只有当环境初始化成功后，才允许开始训练
+            can_train = st.session_state.get('env_init_succeeded', False)
+            if not can_train:
+                 st.warning("环境未成功初始化，无法开始训练。")
+
+            if current_status["status"] in ["idle", "completed", "failed", "stopped"] and can_train:
                 if st.button("🚀 开始训练", type="primary", key="start_training_btn"):
-                    # 检查基本文件
                     if not os.path.exists("data/data.yaml"):
                         st.error("❌ 未找到 data/data.yaml 文件!")
                         st.info("请先在'数据集管理'标签页配置数据集")
@@ -2264,7 +2514,7 @@ label_smoothing=0.0      # 标签平滑
                         st.rerun()
             else:
                 st.button("🚀 开始训练", disabled=True, key="start_training_btn_disabled")
-        
+
         with col2:
             if current_status["status"] == "running":
                 if st.button("⏹️ 停止训练", type="secondary", key="stop_training_btn"):
@@ -2272,37 +2522,30 @@ label_smoothing=0.0      # 标签平滑
                     st.rerun()
             else:
                 st.button("⏹️ 停止训练", disabled=True, key="stop_training_btn_disabled")
-        
+
         with col3:
             if st.button("🔄 刷新状态", key="refresh_training_status_btn"):
                 st.rerun()
-        
+
         with col4:
             if st.button("🧹 清空日志", key="clear_logs_btn"):
                 clear_output()
                 st.success("日志已清空")
                 st.rerun()
-        
-        # 显示Docker命令
+
         with st.expander("🔍 查看执行的Docker命令"):
-            # 使用当前选择的参数生成命令预览
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             run_name = f"train_{timestamp}"
-            
             docker_cmd, _, _, _ = build_docker_training_command(
                 selected_model, epochs, selected_img_size, run_name
             )
             st.code(docker_cmd, language='bash')
-    
+
     with tab3:
         st.subheader("📺 训练输出")
-        
         output_content = read_output()
         if output_content:
-            # 提取训练关键信息
             training_info = extract_training_info(output_content)
-            
-            # 显示训练进度摘要
             if training_info["current_epoch"]:
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -2311,42 +2554,30 @@ label_smoothing=0.0      # 标签平滑
                     st.metric("📈 训练进度", f"{training_info['progress_percentage']:.1f}%")
                 with col3:
                     if training_info["latest_metrics"]:
-                        # 简化显示最新指标
                         if "mAP50-95" in training_info["latest_metrics"]:
                             try:
                                 map_value = training_info["latest_metrics"].split()[-1]
                                 st.metric("🎯 mAP50-95", map_value)
                             except:
                                 st.metric("🎯 最新指标", "计算中...")
-                
-                # 显示进度条
                 progress_bar = st.progress(training_info['progress_percentage'] / 100)
-            
-            # 显示最新的几行日志（置顶显示）
+
             st.markdown("**🔥 最新日志:**")
             lines = output_content.split('\n')
-            
-            # 过滤掉空行，取最后10行有内容的日志
             non_empty_lines = [line for line in lines if line.strip()]
             recent_lines = non_empty_lines[-10:] if len(non_empty_lines) >= 10 else non_empty_lines
-            
-            # 反转显示顺序，最新的在上面
             recent_lines_reversed = list(reversed(recent_lines))
             recent_content = '\n'.join(recent_lines_reversed)
-            
-            # 使用不同的显示方式
             log_container = st.container()
             with log_container:
                 st.code(recent_content, language=None)
-            
-            # 显示选项
+
             col1, col2 = st.columns(2)
             with col1:
                 show_full_log = st.checkbox("显示完整日志", value=False, key="show_full_logs_checkbox")
             with col2:
                 auto_scroll = st.checkbox("自动刷新", value=True, key="auto_refresh_logs_checkbox")
-            
-            # 显示完整日志（可选）
+
             if show_full_log:
                 st.markdown("**📋 完整训练日志:**")
                 st.text_area(
@@ -2355,56 +2586,42 @@ label_smoothing=0.0      # 标签平滑
                     height=300,
                     key="full_output_area"
                 )
-            
-            # 显示日志统计
+
             total_lines = len([line for line in lines if line.strip()])
             st.caption(f"📊 总计 {total_lines} 行有效日志 | 🕒 最后更新: {datetime.now().strftime('%H:%M:%S')}")
-            
         else:
             st.info("暂无输出内容（可以浏览器刷新一下）")
-        
-        # 如果正在运行，自动刷新（默认开启）
+
         if current_status["status"] == "running" and 'auto_scroll' in locals() and auto_scroll:
-            time.sleep(2)  # 每2秒刷新一次
+            time.sleep(2)
             st.rerun()
-    
+
     with tab4:
         display_results()
-    
+
     with tab5:
         model_conversion_section()
 
 
 if __name__ == "__main__":
-    # Windows系统编码设置
     if platform.system() == "Windows":
-        # 设置控制台编码为UTF-8
         os.system('chcp 65001 >nul 2>&1')
-        # 设置环境变量
         os.environ['PYTHONIOENCODING'] = 'utf-8'
         os.environ['CHCP'] = '65001'
-    
-    # 在应用启动时进行环境初始化
-    print("正在启动MaixCam YOLOv11训练平台...")
-    
-    platform_info = get_platform_info()
-    print(f"检测到操作系统: {platform_info['system']} ({platform_info['machine']})")
-    
-    # 在应用启动时进行环境初始化（在后台线程中运行，避免阻塞Streamlit启动）
-    def background_env_check():
-        """后台环境检查"""
-        try:
-            initialize_environment()
-        except Exception as e:
-            print(f"环境初始化失败: {e}")
-            print("程序仍将启动，但某些功能可能无法正常工作")
-    
-    # 创建后台线程进行环境检查
-    env_check_thread = threading.Thread(target=background_env_check)
-    env_check_thread.daemon = True
-    env_check_thread.start()
-    
-    print("🚀 启动Streamlit应用...")
-    
-    # 启动Streamlit应用
+
+    # 不再需要在这里打印操作系统信息或启动后台环境检查线程
+    # print("正在启动MaixCam YOLOv11训练平台...")
+    # platform_info = get_platform_info()
+    # print(f"检测到操作系统: {platform_info['system']} ({platform_info['machine']})")
+    # def background_env_check():
+    #     try:
+    #         initialize_environment() # 这个函数现在返回消息，并且由 main 控制
+    #     except Exception as e:
+    #         print(f"环境初始化失败: {e}")
+    #         print("程序仍将启动，但某些功能可能无法正常工作")
+    # env_check_thread = threading.Thread(target=background_env_check)
+    # env_check_thread.daemon = True
+    # env_check_thread.start()
+
+    # print("🚀 启动Streamlit应用...") # 这个也可以考虑移除或整合到 Streamlit UI 中
     main()
