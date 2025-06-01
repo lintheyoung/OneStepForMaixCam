@@ -3,6 +3,8 @@
 
 # 但是，不要忽略 app.py
 !app.py
+!convert_cvimodel.sh
+!requirements.txt
 
 # 也不要忽略 .gitignore 文件本身 (这是一个好习惯)
 !.gitignore

@@ -1286,8 +1286,118 @@ def dataset_management_section():
                     else:
                         st.error(message)
 
+def extract_conversion_info(output_content):
+    """提取转换关键信息"""
+    lines = output_content.split('\n')
+    info = {
+        "current_step": None,
+        "progress_percentage": 0,
+        "latest_status": None,
+        "conversion_name": None,
+        "model_path": None,
+        "images_collected": None,
+        "images_copied": None,
+        "onnx_conversion_status": None,
+        "cvimodel_conversion_status": None,
+        "mud_file_created": None,
+        "zip_package_created": None
+    }
+    
+    # 转换步骤映射
+    steps_map = {
+        "开始模型转换流程": (1, 10),
+        "查找数据集映射关系": (2, 20),
+        "数据集图片收集与复制": (3, 30),
+        "ONNX模型转换": (4, 40),
+        "ONNX转换成功": (5, 60),
+        "复制转换脚本": (6, 70),
+        "执行CviModel转换": (7, 80),
+        "处理CviModel文件": (8, 90),
+        "完整的MaixCam模型包已创建": (9, 100)
+    }
+    
+    # 从日志中提取信息
+    for line in lines:
+        line = line.strip()
+        
+        # 提取转换名称
+        if "开始模型转换流程" in line and "export_" in line:
+            try:
+                parts = line.split("export_")
+                if len(parts) > 1:
+                    info["conversion_name"] = "export_" + parts[1].split()[0]
+            except:
+                pass
+        
+        # 提取模型路径
+        if "模型文件:" in line:
+            try:
+                info["model_path"] = line.split("模型文件:")[1].strip()
+            except:
+                pass
+        
+        # 检查步骤进度
+        for step_text, (step_num, progress) in steps_map.items():
+            if step_text in line:
+                info["current_step"] = step_text
+                info["progress_percentage"] = progress
+                break
+        
+        # 提取图片收集信息
+        if "找到" in line and "张图片" in line:
+            try:
+                import re
+                numbers = re.findall(r'\d+', line)
+                if numbers:
+                    info["images_collected"] = int(numbers[0])
+            except:
+                pass
+        
+        # 提取图片复制信息
+        if "成功复制" in line and "张图片" in line:
+            try:
+                import re
+                numbers = re.findall(r'\d+', line)
+                if numbers:
+                    info["images_copied"] = int(numbers[0])
+            except:
+                pass
+        
+        # ONNX转换状态
+        if "ONNX转换成功" in line:
+            info["onnx_conversion_status"] = "成功"
+        elif "ONNX转换失败" in line:
+            info["onnx_conversion_status"] = "失败"
+        
+        # CviModel转换状态
+        if "CviModel转换完成" in line:
+            info["cvimodel_conversion_status"] = "成功"
+        elif "CviModel转换失败" in line:
+            info["cvimodel_conversion_status"] = "失败"
+        
+        # MUD文件创建状态
+        if "成功创建MUD配置文件" in line:
+            info["mud_file_created"] = "成功"
+        elif "创建MUD文件失败" in line:
+            info["mud_file_created"] = "失败"
+        
+        # ZIP包创建状态
+        if "成功创建模型包" in line:
+            info["zip_package_created"] = "成功"
+        elif "创建模型包失败" in line:
+            info["zip_package_created"] = "失败"
+    
+    # 提取最新状态
+    for line in reversed(lines[-10:]):
+        line = line.strip()
+        if line and not line.startswith("="):
+            info["latest_status"] = line
+            break
+    
+    return info
+
 def model_conversion_section():
-    """模型转换部分"""
+    """模型转换部分 - 优化版本"""
     st.subheader("🔄 转换pt为MaixCam模型")
     
     # 获取当前状态
@@ -1373,14 +1483,9 @@ def model_conversion_section():
         st.markdown("### ⚙️ ONNX转换参数")
         
         # ONNX Opset版本
-        opset_version = st.slider(
-            "ONNX Opset版本:",
-            min_value=11,
-            max_value=18,
-            value=18,
-            step=1,
-            help="ONNX Opset版本，MaixCam通常推荐使用18"
-        )
+        # ONNX Opset版本（固定）
+        opset_version = 18  # 固定值
+        st.info(f"**ONNX Opset版本:** {opset_version} (固定参数，专为MaixCam优化)")
         
         # 显示高级参数
         with st.expander("高级参数设置"):
@@ -1426,35 +1531,118 @@ device=0                 # 使用第一个GPU设备
                 st.rerun()
         
         # 显示转换过程说明
-        st.markdown("### 📋 转换流程说明")
-        st.info(f"""
-        转换过程将包括以下步骤：
-        1. **数据集图片收集**: 从train和val文件夹收集图片
-        2. **图片复制**: 复制200张图片到transfer/export_时间戳/images/目录
-        3. **测试图片生成**: 创建test.png/jpg文件
-        4. **ONNX转换**: 将pt模型转换为ONNX格式
-        5. **模型复制**: 将转换后的ONNX模型复制到transfer目录
-        6. **脚本复制**: 复制convert_cvimodel.sh到transfer目录 {'✅' if convert_script_exists else '❌ (脚本不存在)'}
-        7. **CviModel转换**: 执行convert_cvimodel.sh生成MaixCam模型 {'✅' if convert_script_exists else '❌ (将跳过)'}
-        8. **MUD文件创建**: 自动生成MUD配置文件 {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
-        9. **模型打包**: 将.cvimodel和.mud文件打包成ZIP文件 {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
+        # st.markdown("### 📋 转换流程说明")
+        # st.info(f"""
+        # 转换过程将包括以下步骤：
+        # 1. **数据集图片收集**: 从train和val文件夹收集图片
+        # 2. **图片复制**: 复制200张图片到transfer/export_时间戳/images/目录
+        # 3. **测试图片生成**: 创建test.png/jpg文件
+        # 4. **ONNX转换**: 将pt模型转换为ONNX格式
+        # 5. **模型复制**: 将转换后的ONNX模型复制到transfer目录
+        # 6. **脚本复制**: 复制convert_cvimodel.sh到transfer目录 {'✅' if convert_script_exists else '❌ (脚本不存在)'}
+        # 7. **CviModel转换**: 执行convert_cvimodel.sh生成MaixCam模型 {'✅' if convert_script_exists else '❌ (将跳过)'}
+        # 8. **MUD文件创建**: 自动生成MUD配置文件 {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
+        # 9. **模型打包**: 将.cvimodel和.mud文件打包成ZIP文件 {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
         
-        最终在transfer/export_时间戳/目录下将包含：
-        - images/ 文件夹 (200张训练图片)
-        - test.png/jpg (测试图片)
-        - *.onnx (转换后的ONNX模型文件)
-        - convert_cvimodel.sh (转换脚本)
-        - export_时间戳_int8.cvimodel (重命名后的MaixCam模型) {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
-        - export_时间戳_int8.mud (MUD配置文件) {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
-        - export_时间戳_int8.zip (完整模型包) {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
-        """)
+        # 最终在transfer/export_时间戳/目录下将包含：
+        # - images/ 文件夹 (200张训练图片)
+        # - test.png/jpg (测试图片)
+        # - *.onnx (转换后的ONNX模型文件)
+        # - convert_cvimodel.sh (转换脚本)
+        # - export_时间戳_int8.cvimodel (重命名后的MaixCam模型) {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
+        # - export_时间戳_int8.mud (MUD配置文件) {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
+        # - export_时间戳_int8.zip (完整模型包) {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
+        # """)
         
-        # 显示转换输出
+        # ===== 优化后的转换输出日志显示部分 =====
         st.markdown("### 📄 转换输出日志")
         conversion_output = read_conversion_output()
         
         if conversion_output:
-            with st.expander("查看转换日志", expanded=True):
+            # 提取转换关键信息
+            conversion_info = extract_conversion_info(conversion_output)
+            
+            # 显示转换进度摘要
+            if conversion_info["current_step"]:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("🔄 当前步骤", conversion_info["current_step"])
+                with col2:
+                    st.metric("📈 转换进度", f"{conversion_info['progress_percentage']:.0f}%")
+                with col3:
+                    if conversion_info["conversion_name"]:
+                        st.metric("📦 转换任务", conversion_info["conversion_name"])
+                
+                # 显示进度条
+                progress_bar = st.progress(conversion_info['progress_percentage'] / 100)
+            
+            # 显示转换状态摘要
+            if any([conversion_info["images_collected"], conversion_info["onnx_conversion_status"], 
+                   conversion_info["cvimodel_conversion_status"], conversion_info["mud_file_created"]]):
+                
+                st.markdown("**🎯 转换状态摘要:**")
+                
+                status_cols = st.columns(4)
+                
+                with status_cols[0]:
+                    if conversion_info["images_collected"]:
+                        st.info(f"📸 图片收集: {conversion_info['images_collected']}张")
+                    if conversion_info["images_copied"]:
+                        st.info(f"📋 图片复制: {conversion_info['images_copied']}张")
+                
+                with status_cols[1]:
+                    if conversion_info["onnx_conversion_status"]:
+                        if conversion_info["onnx_conversion_status"] == "成功":
+                            st.success(f"🔄 ONNX: {conversion_info['onnx_conversion_status']}")
+                        else:
+                            st.error(f"🔄 ONNX: {conversion_info['onnx_conversion_status']}")
+                
+                with status_cols[2]:
+                    if conversion_info["cvimodel_conversion_status"]:
+                        if conversion_info["cvimodel_conversion_status"] == "成功":
+                            st.success(f"🎯 CviModel: {conversion_info['cvimodel_conversion_status']}")
+                        else:
+                            st.error(f"🎯 CviModel: {conversion_info['cvimodel_conversion_status']}")
+                
+                with status_cols[3]:
+                    if conversion_info["mud_file_created"]:
+                        if conversion_info["mud_file_created"] == "成功":
+                            st.success(f"📋 MUD: {conversion_info['mud_file_created']}")
+                        else:
+                            st.error(f"📋 MUD: {conversion_info['mud_file_created']}")
+                    if conversion_info["zip_package_created"]:
+                        if conversion_info["zip_package_created"] == "成功":
+                            st.success(f"📦 ZIP: {conversion_info['zip_package_created']}")
+                        else:
+                            st.error(f"📦 ZIP: {conversion_info['zip_package_created']}")
+            
+            # 显示最新的几行日志（置顶显示）
+            st.markdown("**🔥 最新日志:**")
+            lines = conversion_output.split('\n')
+            
+            # 过滤掉空行和分隔线，取最后10行有内容的日志
+            non_empty_lines = [line for line in lines if line.strip() and not line.strip().startswith('=') and not line.strip().startswith('-')]
+            recent_lines = non_empty_lines[-10:] if len(non_empty_lines) >= 10 else non_empty_lines
+            
+            # 反转显示顺序，最新的在上面
+            recent_lines_reversed = list(reversed(recent_lines))
+            recent_content = '\n'.join(recent_lines_reversed)
+            
+            # 使用代码块显示最新日志
+            log_container = st.container()
+            with log_container:
+                st.code(recent_content, language=None)
+            
+            # 显示选项
+            col1, col2 = st.columns(2)
+            with col1:
+                show_full_conversion_log = st.checkbox("显示完整转换日志", value=False, key="show_full_conversion_logs")
+            with col2:
+                auto_refresh_conversion = st.checkbox("自动刷新", value=True, key="auto_refresh_conversion_logs")
+            
+            # 显示完整日志（可选）
+            if show_full_conversion_log:
+                st.markdown("**📋 完整转换日志:**")
                 st.text_area(
                     "转换日志:",
                     value=conversion_output,
@@ -1462,195 +1650,155 @@ device=0                 # 使用第一个GPU设备
                     key="conversion_output_area"
                 )
             
-            if current_status == "converting":
-                auto_refresh = st.checkbox("自动刷新日志", value=True, key="auto_refresh_conversion_logs")
-                if auto_refresh:
-                    time.sleep(2)  # 每2秒刷新一次
-                    st.rerun()
+            # 显示日志统计
+            total_lines = len([line for line in lines if line.strip()])
+            st.caption(f"📊 总计 {total_lines} 行有效日志 | 🕒 最后更新: {datetime.now().strftime('%H:%M:%S')}")
+            
+            # 如果正在转换，自动刷新
+            if current_status == "converting" and auto_refresh_conversion:
+                time.sleep(2)  # 每2秒刷新一次
+                st.rerun()
+                
         else:
             st.info("暂无转换日志")
         
-        # 显示转换结果（如果有）
-        if current_status not in ["converting", "running"]:
-            # 查找transfer目录中的结果
+        # ===== 新增：显示转换结果和下载功能 =====
+        st.markdown("### 📦 转换结果和下载")
+        
+        # 查找已转换的模型包
+        converted_packages = find_model_packages()
+        converted_cvimodels = find_converted_cvimodels()
+        
+        if converted_packages:
+            st.success(f"✅ 发现 {len(converted_packages)} 个完整模型包")
+            
+            # 显示模型包列表
+            for i, package in enumerate(converted_packages):
+                with st.expander(f"📦 {package['name']} ({package['size']:.2f} MB) - {package['time'].strftime('%Y-%m-%d %H:%M:%S')}", expanded=(i==0)):
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    
+                    with col1:
+                        st.info(f"**文件路径:** `{package['path']}`")
+                        st.info(f"**转换任务:** {package['export_dir']}")
+                        st.info(f"**文件大小:** {package['size']:.2f} MB")
+                        st.info(f"**创建时间:** {package['time'].strftime('%Y-%m-%d %H:%M:%S')}")
+                    
+                    with col2:
+                        # 使用Streamlit的download_button提供下载功能
+                        try:
+                            with open(package['path'], "rb") as file:
+                                file_bytes = file.read()
+                            
+                            st.download_button(
+                                label="📥 下载完整模型包",
+                                data=file_bytes,
+                                file_name=package['name'],
+                                mime="application/zip",
+                                key=f"download_package_{i}",
+                                type="primary"
+                            )
+                        except Exception as e:
+                            st.error(f"准备下载失败: {str(e)}")
+                    
+                    with col3:
+                        # 显示包含内容预览
+                        if st.button(f"🔍 查看内容", key=f"show_content_{i}"):
+                            try:
+                                import zipfile
+                                with zipfile.ZipFile(package['path'], 'r') as zip_ref:
+                                    file_list = zip_ref.namelist()
+                                    st.markdown("**ZIP包内容:**")
+                                    for file in file_list:
+                                        st.text(f"📄 {file}")
+                            except Exception as e:
+                                st.error(f"读取ZIP内容失败: {str(e)}")
+        
+        elif converted_cvimodels:
+            st.warning("⚠️ 发现CviModel文件但无完整模型包")
+            
+            # 显示CviModel文件列表
+            for i, cvimodel in enumerate(converted_cvimodels):
+                with st.expander(f"🎯 {cvimodel['name']} ({cvimodel['size']:.2f} MB) - {cvimodel['time'].strftime('%Y-%m-%d %H:%M:%S')}", expanded=(i==0)):
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        st.info(f"**文件路径:** `{cvimodel['path']}`")
+                        st.info(f"**转换任务:** {cvimodel['export_dir']}")
+                        st.info(f"**文件大小:** {cvimodel['size']:.2f} MB")
+                        st.info(f"**创建时间:** {cvimodel['time'].strftime('%Y-%m-%d %H:%M:%S')}")
+                    
+                    with col2:
+                        # 下载单独的CviModel文件
+                        try:
+                            with open(cvimodel['path'], "rb") as file:
+                                file_bytes = file.read()
+                            
+                            st.download_button(
+                                label="📥 下载CviModel",
+                                data=file_bytes,
+                                file_name=cvimodel['name'],
+                                mime="application/octet-stream",
+                                key=f"download_cvimodel_{i}",
+                                type="secondary"
+                            )
+                        except Exception as e:
+                            st.error(f"准备下载失败: {str(e)}")
+                    
+                    # 检查是否有对应的MUD文件
+                    mud_file_path = cvimodel['path'].replace('.cvimodel', '.mud')
+                    if os.path.exists(mud_file_path):
+                        try:
+                            with open(mud_file_path, "rb") as file:
+                                mud_bytes = file.read()
+                            
+                            st.download_button(
+                                label="📋 下载MUD配置",
+                                data=mud_bytes,
+                                file_name=os.path.basename(mud_file_path),
+                                mime="text/plain",
+                                key=f"download_mud_{i}",
+                                type="secondary"
+                            )
+                        except Exception as e:
+                            st.error(f"准备MUD下载失败: {str(e)}")
+        
+        else:
+            st.info("💡 暂无转换完成的模型包。完成模型转换后，下载按钮将在此处显示。")
+            
+            # 显示transfer目录的所有内容（用于调试）
             transfer_dir = "transfer"
             if os.path.exists(transfer_dir):
-                export_dirs = [d for d in os.listdir(transfer_dir) if d.startswith('export_')]
-                if export_dirs:
-                    # 按时间排序，显示最新的
-                    export_dirs.sort(reverse=True)
-                    latest_export = export_dirs[0]
-                    export_path = os.path.join(transfer_dir, latest_export)
-                    
-                    st.markdown("### 📋 转换结果")
-                    st.success(f"✅ 最新转换结果: {latest_export}")
-                    
-                    # 列出目录内容
-                    if os.path.exists(export_path):
-                        st.markdown(f"**📁 {export_path} 目录内容:**")
-                        for item in os.listdir(export_path):
-                            item_path = os.path.join(export_path, item)
-                            if os.path.isdir(item_path):
-                                item_count = len(os.listdir(item_path))
-                                st.write(f"📂 {item}/ ({item_count} 个文件)")
-                            else:
-                                item_size = os.path.getsize(item_path) / (1024 * 1024)
-                                st.write(f"📄 {item} ({item_size:.2f} MB)")
-                    
-                    st.markdown("### 🔍 MaixCam使用说明")
-                    
-                    # 检查是否有完整的模型包（ZIP文件）
-                    zip_files = [f for f in os.listdir(export_path) if f.endswith('_int8.zip')]
-                    has_zip_package = len(zip_files) > 0
-                    
-                    # 检查是否有cvimodel文件
-                    has_cvimodel = any(f.endswith('.cvimodel') for f in os.listdir(export_path) if os.path.isfile(os.path.join(export_path, f)))
-                    
-                    if has_zip_package:
-                        st.success("🎉 **完整的MaixCam模型包已生成并打包!**")
-                        
-                        # 显示ZIP包下载
-                        for zip_file in zip_files:
-                            zip_path = os.path.join(export_path, zip_file)
-                            zip_size = os.path.getsize(zip_path) / (1024 * 1024)
-                            
-                            st.markdown(f"**📦 完整模型包: {zip_file} ({zip_size:.2f} MB)**")
-                            
-                            # 生成下载链接
-                            download_link = get_download_link(zip_path, zip_file)
-                            st.markdown(download_link, unsafe_allow_html=True)
-                            
-                            st.info(f"""
-                            ✨ **推荐使用模型包下载**
-                            
-                            **模型包包含:**
-                            - 🎯 {zip_file.replace('.zip', '.cvimodel')} (MaixCam优化模型)
-                            - 📋 {zip_file.replace('.zip', '.mud')} (MUD配置文件)
-                            
-                            **使用方法:**
-                            1. 下载上方的ZIP模型包
-                            2. 解压后将.cvimodel和.mud文件放在同一目录
-                            3. 在MaixCam代码中直接加载.cvimodel文件
-                            4. MUD文件包含模型的配置信息，MaixCam会自动读取
-                            """)
-                        
-                    elif has_cvimodel:
-                        st.success("🎉 **完整的MaixCam模型包已生成!**")
-                        
-                        # 查找.cvimodel文件并提供下载
-                        cvimodel_files = [f for f in os.listdir(export_path) if f.endswith('.cvimodel')]
-                        mud_files = [f for f in os.listdir(export_path) if f.endswith('.mud')]
-                        
-                        if cvimodel_files:
-                            cvimodel_file = cvimodel_files[0]  # 取第一个.cvimodel文件
-                            cvimodel_path = os.path.join(export_path, cvimodel_file)
-                            
-                            st.markdown(f"**🎯 MaixCam优化模型: {cvimodel_file}**")
-                            
-                            # 生成下载链接
-                            download_link = get_download_link(cvimodel_path, cvimodel_file)
-                            st.markdown(download_link, unsafe_allow_html=True)
-                        
-                        # 显示MUD文件下载
-                        if mud_files:
-                            mud_file = mud_files[0]
-                            mud_path = os.path.join(export_path, mud_file)
-                            
-                            st.markdown(f"**📋 MUD配置文件: {mud_file}**")
-                            
-                            # 生成下载链接
-                            download_link = get_download_link(mud_path, mud_file)
-                            st.markdown(download_link, unsafe_allow_html=True)
-                        
-                        st.markdown(f"""
-                        转换完成的文件已打包在: `{export_path}`
-                        
-                        **使用步骤:**
-                        1. 点击上方下载链接获取MaixCam优化模型和配置文件
-                        2. **优先使用下载的 *.cvimodel 文件** (专为MaixCam优化)
-                        3. 将.cvimodel和.mud文件放在同一目录
-                        4. 如需完整包，将整个 `{latest_export}` 文件夹复制到MaixCam设备
-                        5. images文件夹包含200张训练图片供测试
-                        6. test图片可用于快速验证模型效果
-                        
-                        **注意:** MaixCam可以直接使用.cvimodel文件，配合.mud配置文件性能更佳！
-                        """)
-                    else:
-                        st.info("ℹ️ **ONNX模型包已生成**")
-                        st.markdown(f"""
-                        转换完成的文件已打包在: `{export_path}`
-                        
-                        **使用步骤:**
-                        1. 将整个 `{latest_export}` 文件夹复制到MaixCam设备
-                        2. ONNX模型文件可直接在MaixCam上使用
-                        3. images文件夹包含200张训练图片供测试
-                        4. test图片可用于快速验证模型效果
-                        
-                        **注意:** 如需.cvimodel文件，请确保convert_cvimodel.sh脚本存在并重新转换。
-                        """)
+                with st.expander("🔍 调试：查看transfer目录内容"):
+                    for item in os.listdir(transfer_dir):
+                        item_path = os.path.join(transfer_dir, item)
+                        if os.path.isdir(item_path):
+                            st.write(f"📁 {item}/")
+                            # 显示子目录内容
+                            for subitem in os.listdir(item_path):
+                                subitem_path = os.path.join(item_path, subitem)
+                                if os.path.isfile(subitem_path):
+                                    size_mb = os.path.getsize(subitem_path) / (1024 * 1024)
+                                    st.write(f"   📄 {subitem} ({size_mb:.2f} MB)")
+                                else:
+                                    st.write(f"   📁 {subitem}/")
+            else:
+                st.info("transfer目录不存在")
         
-        # 显示所有历史转换记录和下载
-        if os.path.exists("transfer"):
-            export_dirs = [d for d in os.listdir("transfer") if d.startswith('export_')]
-            if export_dirs:
-                with st.expander("📚 历史转换记录与下载"):
-                    export_dirs.sort(reverse=True)
-                    
-                    for export_dir in export_dirs:
-                        export_path = os.path.join("transfer", export_dir)
-                        if os.path.exists(export_path):
-                            # 获取目录信息
-                            dir_size = sum(os.path.getsize(os.path.join(export_path, f)) 
-                                         for f in os.listdir(export_path) 
-                                         if os.path.isfile(os.path.join(export_path, f)))
-                            dir_size_mb = dir_size / (1024 * 1024)
-                            
-                            # 检查文件类型
-                            zip_files = [f for f in os.listdir(export_path) if f.endswith('_int8.zip')]
-                            cvimodel_files = [f for f in os.listdir(export_path) if f.endswith('.cvimodel')]
-                            mud_files = [f for f in os.listdir(export_path) if f.endswith('.mud')]
-                            
-                            has_zip = len(zip_files) > 0
-                            has_cvimodel = len(cvimodel_files) > 0
-                            has_mud = len(mud_files) > 0
-                            
-                            # 显示指示器
-                            indicators = []
-                            if has_zip:
-                                indicators.append("📦")
-                            if has_cvimodel:
-                                indicators.append("🎯")
-                            if has_mud:
-                                indicators.append("📋")
-                            if not any([has_zip, has_cvimodel, has_mud]):
-                                indicators.append("📄")
-                            
-                            indicator_str = "".join(indicators)
-                            
-                            st.write(f"**{export_dir}** ({dir_size_mb:.1f} MB) {indicator_str}")
-                            
-                            # 优先显示ZIP包下载
-                            if has_zip:
-                                for zip_file in zip_files:
-                                    zip_path = os.path.join(export_path, zip_file)
-                                    download_link = get_download_link(zip_path, zip_file)
-                                    st.markdown(f"  └─ {download_link} (推荐)", unsafe_allow_html=True)
-                            
-                            # 然后显示单独的.cvimodel文件
-                            elif has_cvimodel:
-                                for cvimodel_file in cvimodel_files:
-                                    cvimodel_path = os.path.join(export_path, cvimodel_file)
-                                    download_link = get_download_link(cvimodel_path, cvimodel_file)
-                                    st.markdown(f"  └─ {download_link}", unsafe_allow_html=True)
-                                
-                                # 显示对应的MUD文件
-                                if has_mud:
-                                    for mud_file in mud_files:
-                                        mud_path = os.path.join(export_path, mud_file)
-                                        download_link = get_download_link(mud_path, mud_file)
-                                        st.markdown(f"  └─ {download_link}", unsafe_allow_html=True)
-                            
-                            st.markdown("---")
+        # 显示使用说明
+        # st.markdown("### 📖 下载文件使用说明")
+        # st.info("""
+        # **完整模型包 (.zip):**
+        # - 包含 .cvimodel 和 .mud 文件
+        # - 包含 200张训练图片和测试图片
+        # - 包含 ONNX 模型和转换脚本
+        # - 推荐下载，开箱即用
+        
+        # **MaixCam 部署:**
+        # 1. 下载完整模型包 (.zip)
+        # 2. 解压后将 .cvimodel 和 .mud 文件复制到 MaixCam 设备
+        # 3. 使用 MaixCam SDK 加载模型进行推理
+        # 4. 参考包内的图片进行测试
+        # """)
 
 def main():
     st.set_page_config(
@@ -1692,7 +1840,8 @@ def main():
         st.markdown("### ⚙️ 训练参数设置")
         
         # 模型选择
-        model_options = ["yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"]
+        # "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"，暂时只是支持yolo11n
+        model_options = ["yolo11n.pt"]
         selected_model = st.selectbox(
             "选择模型:",
             model_options,
@@ -1861,7 +2010,7 @@ label_smoothing=0.0      # 标签平滑
             st.caption(f"📊 总计 {total_lines} 行有效日志 | 🕒 最后更新: {datetime.now().strftime('%H:%M:%S')}")
             
         else:
-            st.info("暂无输出内容")
+            st.info("暂无输出内容（可以浏览器刷新一下）")
         
         # 如果正在运行，自动刷新（默认开启）
         if current_status["status"] == "running" and 'auto_scroll' in locals() and auto_scroll:
@@ -1874,49 +2023,49 @@ label_smoothing=0.0      # 标签平滑
     with tab5:
         model_conversion_section()
     
-    # 底部信息
-    st.markdown("---")
-    st.markdown("💡 **使用说明:**")
-    st.markdown("1. 在 '数据集管理' 标签页上传ZIP文件或提供下载URL")
-    st.markdown("2. 系统会自动查找并验证data.yaml配置文件")
-    st.markdown("3. 在 '训练控制' 标签页设置训练参数")
-    st.markdown("4. 确保 Docker 镜像 `yolov11-trainer:latest` 已构建")
-    st.markdown("5. 在 '训练控制' 标签页启动训练过程")
-    st.markdown("6. 在 '实时输出' 标签页查看训练进度")
-    st.markdown("7. 训练完成后在 '训练结果' 标签页查看结果")
-    st.markdown("8. 在 '转换pt为MaixCam模型' 标签页将训练好的模型转换并打包")
-    st.markdown("9. 转换完成后可直接下载完整的.zip模型包用于MaixCam设备")
+    # # 底部信息
+    # st.markdown("---")
+    # st.markdown("💡 **使用说明:**")
+    # st.markdown("1. 在 '数据集管理' 标签页上传ZIP文件或提供下载URL")
+    # st.markdown("2. 系统会自动查找并验证data.yaml配置文件")
+    # st.markdown("3. 在 '训练控制' 标签页设置训练参数")
+    # st.markdown("4. 确保 Docker 镜像 `yolov11-trainer:latest` 已构建")
+    # st.markdown("5. 在 '训练控制' 标签页启动训练过程")
+    # st.markdown("6. 在 '实时输出' 标签页查看训练进度")
+    # st.markdown("7. 训练完成后在 '训练结果' 标签页查看结果")
+    # st.markdown("8. 在 '转换pt为MaixCam模型' 标签页将训练好的模型转换并打包")
+    # st.markdown("9. 转换完成后可直接下载完整的.zip模型包用于MaixCam设备")
     
-    st.markdown("### 📋 数据集格式要求:")
-    st.markdown("- 数据集应为ZIP格式")
-    st.markdown("- 包含标准的YOLO格式目录结构")
-    st.markdown("- 必须包含data.yaml配置文件")
-    st.markdown("- 支持的配置字段: train, val, names, nc(可选)")
+    # st.markdown("### 📋 数据集格式要求:")
+    # st.markdown("- 数据集应为ZIP格式")
+    # st.markdown("- 包含标准的YOLO格式目录结构")
+    # st.markdown("- 必须包含data.yaml配置文件")
+    # st.markdown("- 支持的配置字段: train, val, names, nc(可选)")
     
-    st.markdown("### 🔄 模型转换功能:")
-    st.markdown("- 自动建立PT文件与数据集的映射关系")
-    st.markdown("- 从训练数据集中复制200张图片供测试")
-    st.markdown("- 创建测试图片文件")
-    st.markdown("- 转换PT模型为ONNX格式")
-    st.markdown("- 复制convert_cvimodel.sh脚本并执行CviModel转换")
-    st.markdown("- 自动重命名.cvimodel文件为export_时间戳_int8.cvimodel格式")
-    st.markdown("- **新增：自动生成.mud配置文件，包含模型配置和数据集标签**")
-    st.markdown("- **新增：将.cvimodel和.mud文件打包成完整的.zip模型包**")
-    st.markdown("- 提供直接下载链接，支持MaixCam直接使用")
+    # st.markdown("### 🔄 模型转换功能:")
+    # st.markdown("- 自动建立PT文件与数据集的映射关系")
+    # st.markdown("- 从训练数据集中复制200张图片供测试")
+    # st.markdown("- 创建测试图片文件")
+    # st.markdown("- 转换PT模型为ONNX格式")
+    # st.markdown("- 复制convert_cvimodel.sh脚本并执行CviModel转换")
+    # st.markdown("- 自动重命名.cvimodel文件为export_时间戳_int8.cvimodel格式")
+    # st.markdown("- **新增：自动生成.mud配置文件，包含模型配置和数据集标签**")
+    # st.markdown("- **新增：将.cvimodel和.mud文件打包成完整的.zip模型包**")
+    # st.markdown("- 提供直接下载链接，支持MaixCam直接使用")
     
-    st.markdown("### 📝 MaixCam转换要求:")
-    st.markdown("- 需要在应用根目录放置 `convert_cvimodel.sh` 脚本")
-    st.markdown("- 需要 `lintheyoung/tpuc_dev_env_build` Docker镜像")
-    st.markdown("- 生成的 `.cvimodel` 文件专为MaixCam优化，性能更佳")
-    st.markdown("- **新增：自动生成的.mud文件包含完整的模型配置信息**")
-    st.markdown("- **新增：完整的.zip模型包包含.cvimodel和.mud文件，即下即用**")
-    st.markdown("- 转换完成后文件会自动重命名并可直接下载完整包")
+    # st.markdown("### 📝 MaixCam转换要求:")
+    # st.markdown("- 需要在应用根目录放置 `convert_cvimodel.sh` 脚本")
+    # st.markdown("- 需要 `lintheyoung/tpuc_dev_env_build` Docker镜像")
+    # st.markdown("- 生成的 `.cvimodel` 文件专为MaixCam优化，性能更佳")
+    # st.markdown("- **新增：自动生成的.mud文件包含完整的模型配置信息**")
+    # st.markdown("- **新增：完整的.zip模型包包含.cvimodel和.mud文件，即下即用**")
+    # st.markdown("- 转换完成后文件会自动重命名并可直接下载完整包")
     
-    st.markdown("### 📦 MUD文件说明:")
-    st.markdown("- MUD文件是MaixCam模型的配置文件")
-    st.markdown("- 包含模型类型、输入格式、预处理参数等信息")
-    st.markdown("- 自动从data.yaml中提取类别标签信息")
-    st.markdown("- 与.cvimodel文件配套使用，简化MaixCam部署流程")
+    # st.markdown("### 📦 MUD文件说明:")
+    # st.markdown("- MUD文件是MaixCam模型的配置文件")
+    # st.markdown("- 包含模型类型、输入格式、预处理参数等信息")
+    # st.markdown("- 自动从data.yaml中提取类别标签信息")
+    # st.markdown("- 与.cvimodel文件配套使用，简化MaixCam部署流程")
 
 if __name__ == "__main__":
     main()
