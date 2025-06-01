@@ -9,7 +9,6 @@ import requests
 import shutil
 import yaml
 import platform
-import signal
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +17,12 @@ import glob
 import random
 import base64
 import sys
+
+# 跨平台信号处理
+try:
+    import signal
+except ImportError:
+    signal = None  # Windows某些情况下可能不支持某些信号
 
 # 状态文件
 STATUS_FILE = "test_status.json"
@@ -76,13 +81,22 @@ def terminate_process_cross_platform(pid):
         
     try:
         if platform.system() == "Windows":
-            # Windows使用taskkill
+            # Windows使用taskkill，设置正确的编码
+            env = os.environ.copy()
+            env['PYTHONIOENCODING'] = 'utf-8'
+            env['CHCP'] = '65001'
+            
             result = subprocess.run(f"taskkill /F /PID {pid}", 
                                   shell=True, check=False, 
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True,
+                                  encoding='utf-8', errors='replace', env=env)
             return result.returncode == 0
         else:
             # Linux/Mac使用信号
+            if signal is None:
+                print("信号模块不可用，无法终止进程")
+                return False
+                
             try:
                 os.kill(pid, signal.SIGTERM)  # 先尝试温和终止
                 time.sleep(2)
@@ -95,6 +109,62 @@ def terminate_process_cross_platform(pid):
     except Exception as e:
         print(f"终止进程失败: {e}")
         return False
+
+# ==================== 添加编码安全的subprocess包装函数 ====================
+
+def run_subprocess_safe(cmd, timeout=30, shell=False, cwd=None):
+    """安全的subprocess调用，处理编码问题"""
+    try:
+        # 设置环境变量强制UTF-8输出
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'  # UTF-8 code page for Windows
+        
+        if isinstance(cmd, str):
+            shell = True
+        
+        result = subprocess.run(
+            cmd,
+            shell=shell,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding='utf-8',
+            errors='replace',
+            env=env,
+            cwd=cwd
+        )
+        return result
+    except Exception as e:
+        print(f"subprocess执行失败: {e}")
+        return None
+
+def create_subprocess_safe(cmd, cwd=None):
+    """创建安全的subprocess.Popen，处理编码问题"""
+    try:
+        # 设置环境变量强制UTF-8输出
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'  # UTF-8 code page for Windows
+        
+        process = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            encoding='utf-8',
+            errors='replace',  # 遇到无法解码的字符时替换而不是报错
+            bufsize=1,
+            env=env,
+            cwd=cwd
+        )
+        return process
+    except Exception as e:
+        print(f"创建subprocess失败: {e}")
+        return None
 
 def create_directory_safe(directory_path):
     """安全创建目录，处理权限问题"""
@@ -122,9 +192,16 @@ def check_docker_environment():
     try:
         print("🔍 检查Docker环境...")
         
+        # 设置环境变量强制UTF-8输出（Windows兼容）
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'  # UTF-8 code page for Windows
+        
         # 检查Docker是否安装
         result = subprocess.run(['docker', '--version'], 
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=10,
+                              encoding='utf-8', errors='replace', env=env)
         if result.returncode != 0:
             print("❌ Docker未安装或无法访问")
             print("请安装Docker: https://docs.docker.com/get-docker/")
@@ -134,7 +211,8 @@ def check_docker_environment():
         
         # 检查Docker是否运行
         result = subprocess.run(['docker', 'info'], 
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=10,
+                              encoding='utf-8', errors='replace', env=env)
         if result.returncode != 0:
             print("❌ Docker服务未运行")
             print("请启动Docker服务")
@@ -161,8 +239,15 @@ def check_docker_environment():
 def check_docker_permissions():
     """检查Docker权限（Linux特有问题）"""
     try:
+        # 设置环境变量强制UTF-8输出
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'
+        
         result = subprocess.run(['docker', 'ps'], 
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=10,
+                              encoding='utf-8', errors='replace', env=env)
         if result.returncode != 0:
             if "permission denied" in result.stderr.lower():
                 print("❌ Docker权限不足，请运行:")
@@ -184,10 +269,18 @@ def check_nvidia_docker():
     """检查NVIDIA Docker支持"""
     try:
         print("🔍 检查NVIDIA Docker支持...")
+        
+        # 设置环境变量强制UTF-8输出
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'
+        
         result = subprocess.run([
             'docker', 'run', '--rm', '--gpus', 'all', 
             'nvidia/cuda:11.8-base-ubuntu20.04', 'nvidia-smi'
-        ], capture_output=True, text=True, timeout=30)
+        ], capture_output=True, text=True, timeout=30,
+           encoding='utf-8', errors='replace', env=env)
         
         if result.returncode == 0:
             print("✅ NVIDIA Docker支持正常")
@@ -202,8 +295,15 @@ def check_nvidia_docker():
 def check_docker_image_exists(image_name):
     """检查Docker镜像是否存在"""
     try:
+        # 设置环境变量强制UTF-8输出
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'
+        
         result = subprocess.run(['docker', 'images', '-q', image_name], 
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=30,
+                              encoding='utf-8', errors='replace', env=env)
         return result.returncode == 0 and result.stdout.strip() != ""
     except Exception as e:
         print(f"❌ 检查镜像 {image_name} 时发生错误: {str(e)}")
@@ -215,8 +315,15 @@ def pull_docker_image(image_name):
         print(f"📥 正在下载Docker镜像: {image_name}")
         print("这可能需要几分钟时间，请耐心等待...")
         
+        # 设置环境变量强制UTF-8输出
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        if platform.system() == "Windows":
+            env['CHCP'] = '65001'
+        
         result = subprocess.run(['docker', 'pull', image_name], 
-                              capture_output=True, text=True, timeout=1800)  # 30分钟超时
+                              capture_output=True, text=True, timeout=1800,
+                              encoding='utf-8', errors='replace', env=env)  # 30分钟超时
         
         if result.returncode == 0:
             print(f"✅ 镜像下载成功: {image_name}")
@@ -704,6 +811,7 @@ def process_url_dataset(url):
         # 下载
         response = requests.get(url, stream=True)
         response.raise_for_status()
+        response.encoding = 'utf-8'  # 明确设置编码
         
         total_size = int(response.headers.get('content-length', 0))
         downloaded_size = 0
@@ -952,17 +1060,14 @@ def run_docker_training(model, epochs, imgsz):
             save_pt_dataset_mapping(future_best_pt, data_path, run_name)
             save_pt_dataset_mapping(future_last_pt, data_path, run_name)
             
-            # 启动进程 - 明确指定UTF-8编码
-            process = subprocess.Popen(
-                docker_command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=True,
-                encoding='utf-8',
-                errors='replace',  # 遇到无法解码的字符时替换而不是报错
-                bufsize=1
-            )
+            # 启动进程 - 使用安全的subprocess创建函数
+            process = create_subprocess_safe(docker_command)
+            
+            if process is None:
+                set_status("failed")
+                with open(OUTPUT_FILE, 'a', encoding='utf-8', errors='replace') as f:
+                    f.write("\n❌ 无法启动Docker训练进程")
+                return
             
             set_status("running", process.pid, run_name)
             
@@ -1099,17 +1204,14 @@ def run_model_conversion(model_path, format="onnx", opset=18):
                 model_path, format, imgsz_height, imgsz_width, opset, conversion_name
             )
             
-            # 启动进程 - 明确指定UTF-8编码
-            process = subprocess.Popen(
-                docker_command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=True,
-                encoding='utf-8',
-                errors='replace',
-                bufsize=1
-            )
+            # 启动进程 - 使用安全的subprocess创建函数
+            process = create_subprocess_safe(docker_command)
+            
+            if process is None:
+                set_status("failed", current_run=conversion_name)
+                with open(CONVERSION_OUTPUT_FILE, 'a', encoding='utf-8', errors='replace') as f:
+                    f.write("\n❌ 无法启动Docker转换进程")
+                return
             
             # 记录进程ID
             set_status("converting", process.pid, conversion_name)
@@ -1181,84 +1283,78 @@ def run_model_conversion(model_path, format="onnx", opset=18):
                             f.write(f"执行命令:\n{cvi_docker_command}\n\n")
                             f.flush()
                             
-                            # 启动CviModel转换进程
-                            cvi_process = subprocess.Popen(
-                                cvi_docker_command,
-                                shell=True,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT,
-                                universal_newlines=True,
-                                encoding='utf-8',
-                                errors='replace',
-                                bufsize=1,
-                                cwd=os.path.abspath(transfer_dir)  # 设置工作目录
-                            )
+                            # 启动CviModel转换进程 - 使用安全的subprocess创建函数
+                            cvi_process = create_subprocess_safe(cvi_docker_command, cwd=os.path.abspath(transfer_dir))
                             
-                            # 实时读取CviModel转换输出
-                            f.write("CviModel转换输出:\n")
-                            f.write("-" * 50 + "\n")
-                            f.flush()
-                            
-                            for line in iter(cvi_process.stdout.readline, ''):
-                                if line:
-                                    try:
-                                        f.write(line)
-                                        f.flush()
-                                    except UnicodeEncodeError:
-                                        clean_line = line.encode('utf-8', errors='replace').decode('utf-8')
-                                        f.write(clean_line)
-                                        f.flush()
-                            
-                            # 等待CviModel转换完成
-                            cvi_return_code = cvi_process.wait()
-                            
-                            f.write("-" * 50 + "\n")
-                            if cvi_return_code == 0:
-                                f.write("✅ CviModel转换完成!\n")
-                                
-                                # 查找并移动.cvimodel文件，同时创建MUD文件和ZIP包
-                                f.write("\n=== 处理CviModel文件 ===\n")
+                            if cvi_process is None:
+                                f.write("❌ 无法启动CviModel转换进程\n")
+                                f.write("ONNX模型仍可正常使用\n")
+                            else:
+                                # 实时读取CviModel转换输出
+                                f.write("CviModel转换输出:\n")
+                                f.write("-" * 50 + "\n")
                                 f.flush()
                                 
-                                # 从模型路径中提取文件名
-                                selected_model_name = os.path.basename(model_path)
-                                moved_file_path, mud_file_path, zip_file_path, move_message = find_and_move_cvimodel(
-                                    transfer_dir, conversion_name, selected_model_name
-                                )
+                                for line in iter(cvi_process.stdout.readline, ''):
+                                    if line:
+                                        try:
+                                            f.write(line)
+                                            f.flush()
+                                        except UnicodeEncodeError:
+                                            clean_line = line.encode('utf-8', errors='replace').decode('utf-8')
+                                            f.write(clean_line)
+                                            f.flush()
                                 
-                                f.write(f"{move_message}\n")
+                                # 等待CviModel转换完成
+                                cvi_return_code = cvi_process.wait()
                                 
-                                if moved_file_path:
-                                    f.write(f"CviModel文件路径: {moved_file_path}\n")
-                                    f.write(f"CviModel文件大小: {os.path.getsize(moved_file_path) / (1024*1024):.2f} MB\n")
-                                
-                                if mud_file_path:
-                                    f.write(f"MUD配置文件路径: {mud_file_path}\n")
-                                    f.write(f"MUD文件大小: {os.path.getsize(mud_file_path) / 1024:.2f} KB\n")
-                                
-                                if zip_file_path:
-                                    f.write(f"模型包ZIP路径: {zip_file_path}\n")
-                                    f.write(f"ZIP文件大小: {os.path.getsize(zip_file_path) / (1024*1024):.2f} MB\n")
-                                
-                                f.write(f"\n🎉 完整的MaixCam模型包已创建: {transfer_dir}\n")
-                                f.write("包含内容:\n")
-                                f.write("  - images/ (200张训练图片)\n")
-                                f.write("  - test.png/jpg (测试图片)\n")
-                                f.write("  - *.onnx (ONNX模型)\n")
-                                f.write("  - convert_cvimodel.sh (转换脚本)\n")
-                                if moved_file_path:
-                                    final_cvimodel_filename = os.path.basename(moved_file_path)
-                                    f.write(f"  - {final_cvimodel_filename} (MaixCam优化模型) 🎯\n")
-                                if mud_file_path:
-                                    final_mud_filename = os.path.basename(mud_file_path)
-                                    f.write(f"  - {final_mud_filename} (MUD配置文件) 📋\n")
-                                if zip_file_path:
-                                    final_zip_filename = os.path.basename(zip_file_path)
-                                    f.write(f"  - {final_zip_filename} (完整模型包) 📦\n")
-                                
-                            else:
-                                f.write(f"❌ CviModel转换失败，退出码: {cvi_return_code}\n")
-                                f.write("ONNX模型仍可正常使用\n")
+                                f.write("-" * 50 + "\n")
+                                if cvi_return_code == 0:
+                                    f.write("✅ CviModel转换完成!\n")
+                                    
+                                    # 查找并移动.cvimodel文件，同时创建MUD文件和ZIP包
+                                    f.write("\n=== 处理CviModel文件 ===\n")
+                                    f.flush()
+                                    
+                                    # 从模型路径中提取文件名
+                                    selected_model_name = os.path.basename(model_path)
+                                    moved_file_path, mud_file_path, zip_file_path, move_message = find_and_move_cvimodel(
+                                        transfer_dir, conversion_name, selected_model_name
+                                    )
+                                    
+                                    f.write(f"{move_message}\n")
+                                    
+                                    if moved_file_path:
+                                        f.write(f"CviModel文件路径: {moved_file_path}\n")
+                                        f.write(f"CviModel文件大小: {os.path.getsize(moved_file_path) / (1024*1024):.2f} MB\n")
+                                    
+                                    if mud_file_path:
+                                        f.write(f"MUD配置文件路径: {mud_file_path}\n")
+                                        f.write(f"MUD文件大小: {os.path.getsize(mud_file_path) / 1024:.2f} KB\n")
+                                    
+                                    if zip_file_path:
+                                        f.write(f"模型包ZIP路径: {zip_file_path}\n")
+                                        f.write(f"ZIP文件大小: {os.path.getsize(zip_file_path) / (1024*1024):.2f} MB\n")
+                                    
+                                    f.write(f"\n🎉 完整的MaixCam模型包已创建: {transfer_dir}\n")
+                                    f.write("包含内容:\n")
+                                    f.write("  - images/ (200张训练图片)\n")
+                                    f.write("  - test.png/jpg (测试图片)\n")
+                                    f.write("  - *.onnx (ONNX模型)\n")
+                                    f.write("  - convert_cvimodel.sh (转换脚本)\n")
+                                    if moved_file_path:
+                                        final_cvimodel_filename = os.path.basename(moved_file_path)
+                                        f.write(f"  - {final_cvimodel_filename} (MaixCam优化模型) 🎯\n")
+                                    if mud_file_path:
+                                        final_mud_filename = os.path.basename(mud_file_path)
+                                        f.write(f"  - {final_mud_filename} (MUD配置文件) 📋\n")
+                                    if zip_file_path:
+                                        final_zip_filename = os.path.basename(zip_file_path)
+                                        f.write(f"  - {final_zip_filename} (完整模型包) 📦\n")
+                                    
+                                else:
+                                    f.write(f"❌ CviModel转换失败，退出码: {cvi_return_code}\n")
+                                    f.write("ONNX模型仍可正常使用\n")
                             
                         else:
                             f.write(f"⚠️ 未找到转换脚本: {convert_script_path}\n")
@@ -2280,6 +2376,14 @@ label_smoothing=0.0      # 标签平滑
 
 
 if __name__ == "__main__":
+    # Windows系统编码设置
+    if platform.system() == "Windows":
+        # 设置控制台编码为UTF-8
+        os.system('chcp 65001 >nul 2>&1')
+        # 设置环境变量
+        os.environ['PYTHONIOENCODING'] = 'utf-8'
+        os.environ['CHCP'] = '65001'
+    
     # 在应用启动时进行环境初始化
     print("正在启动MaixCam YOLOv11训练平台...")
     
