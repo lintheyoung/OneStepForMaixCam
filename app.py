@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import glob
 import random
 import base64
+import sys
 
 # 状态文件
 STATUS_FILE = "test_status.json"
@@ -21,6 +22,126 @@ OUTPUT_FILE = "test_output.txt"
 DATASET_INFO_FILE = "dataset_info.json"
 CONVERSION_OUTPUT_FILE = "conversion_output.txt"
 MAPPING_FILE = "pt_dataset_mapping.json"  # 新增: 映射关系文件
+
+# Docker镜像配置
+REQUIRED_DOCKER_IMAGES = [
+    "lintheyoung/yolov11-trainer:latest",  # 用于训练和ONNX转换
+    "lintheyoung/tpuc_dev_env_build"       # 用于CviModel转换
+]
+
+def check_docker_environment():
+    """检查Docker环境是否可用"""
+    try:
+        print("🔍 检查Docker环境...")
+        
+        # 检查Docker是否安装
+        result = subprocess.run(['docker', '--version'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            print("❌ Docker未安装或无法访问")
+            print("请安装Docker: https://docs.docker.com/get-docker/")
+            return False
+        
+        print(f"✅ Docker已安装: {result.stdout.strip()}")
+        
+        # 检查Docker是否运行
+        result = subprocess.run(['docker', 'info'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            print("❌ Docker服务未运行")
+            print("请启动Docker服务")
+            return False
+        
+        print("✅ Docker服务正在运行")
+        return True
+        
+    except subprocess.TimeoutExpired:
+        print("❌ Docker命令超时，请检查Docker是否正常运行")
+        return False
+    except FileNotFoundError:
+        print("❌ 未找到Docker命令，请确认Docker已正确安装")
+        return False
+    except Exception as e:
+        print(f"❌ 检查Docker环境时发生错误: {str(e)}")
+        return False
+
+def check_docker_image_exists(image_name):
+    """检查Docker镜像是否存在"""
+    try:
+        result = subprocess.run(['docker', 'images', '-q', image_name], 
+                              capture_output=True, text=True, timeout=30)
+        return result.returncode == 0 and result.stdout.strip() != ""
+    except Exception as e:
+        print(f"❌ 检查镜像 {image_name} 时发生错误: {str(e)}")
+        return False
+
+def pull_docker_image(image_name):
+    """拉取Docker镜像"""
+    try:
+        print(f"📥 正在下载Docker镜像: {image_name}")
+        print("这可能需要几分钟时间，请耐心等待...")
+        
+        result = subprocess.run(['docker', 'pull', image_name], 
+                              capture_output=True, text=True, timeout=1800)  # 30分钟超时
+        
+        if result.returncode == 0:
+            print(f"✅ 镜像下载成功: {image_name}")
+            return True
+        else:
+            print(f"❌ 镜像下载失败: {image_name}")
+            print(f"错误信息: {result.stderr}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        print(f"❌ 下载镜像 {image_name} 超时")
+        return False
+    except Exception as e:
+        print(f"❌ 下载镜像 {image_name} 时发生错误: {str(e)}")
+        return False
+
+def check_and_pull_docker_images():
+    """检查并下载所需的Docker镜像"""
+    print("🔍 检查所需的Docker镜像...")
+    
+    missing_images = []
+    
+    for image in REQUIRED_DOCKER_IMAGES:
+        if check_docker_image_exists(image):
+            print(f"✅ 镜像已存在: {image}")
+        else:
+            print(f"⚠️  镜像不存在: {image}")
+            missing_images.append(image)
+    
+    if missing_images:
+        print(f"\n📥 需要下载 {len(missing_images)} 个镜像...")
+        for image in missing_images:
+            if not pull_docker_image(image):
+                print(f"❌ 无法下载镜像: {image}")
+                return False
+    
+    print("✅ 所有Docker镜像检查完成")
+    return True
+
+def initialize_environment():
+    """初始化环境检查"""
+    print("=" * 50)
+    print("🚀 MaixCam YOLOv11训练平台 - 环境初始化")
+    print("=" * 50)
+    
+    # 检查Docker环境
+    if not check_docker_environment():
+        print("❌ Docker环境检查失败，程序可能无法正常运行")
+        print("请确保Docker已安装并正在运行")
+        return False
+    
+    # 检查并下载Docker镜像
+    if not check_and_pull_docker_images():
+        print("❌ Docker镜像准备失败，程序可能无法正常运行")
+        return False
+    
+    print("✅ 环境初始化完成，程序已准备就绪")
+    print("=" * 50)
+    return True
 
 def init_status():
     """初始化状态"""
@@ -624,8 +745,8 @@ def run_docker_training(model, epochs, imgsz):
             save_pt_dataset_mapping(future_best_pt, data_path, run_name)
             save_pt_dataset_mapping(future_last_pt, data_path, run_name)
             
-            # Docker命令，使用用户设置的参数
-            docker_command = f'''docker run --gpus all --name yolov11-{run_name} --rm --shm-size=4g -v "{data_path}:/workspace/data" -v "{models_path}:/workspace/models" -v "{outputs_path}:/workspace/outputs" yolov11-trainer:latest bash -c "cd /workspace/models && yolo train data=/workspace/data/data.yaml model={model} epochs={epochs} imgsz={imgsz} project=/workspace/outputs name={run_name}"'''
+            # Docker命令，使用更新的镜像名称
+            docker_command = f'''docker run --gpus all --name yolov11-{run_name} --rm --shm-size=4g -v "{data_path}:/workspace/data" -v "{models_path}:/workspace/models" -v "{outputs_path}:/workspace/outputs" lintheyoung/yolov11-trainer:latest bash -c "cd /workspace/models && yolo train data=/workspace/data/data.yaml model={model} epochs={epochs} imgsz={imgsz} project=/workspace/outputs name={run_name}"'''
             
             # 启动进程 - 明确指定UTF-8编码
             process = subprocess.Popen(
@@ -784,8 +905,8 @@ def run_model_conversion(model_path, format="onnx", opset=18):
             imgsz_height = 224
             imgsz_width = 320
             
-            # Docker命令，使用用户设置的参数
-            docker_command = f'''docker run --gpus all --name yolo-export-{conversion_name} --rm --shm-size=4g -v "{data_path}:/workspace/data" -v "{models_path}:/workspace/models" -v "{outputs_path}:/workspace/outputs" yolov11-trainer:latest bash -c "yolo export model={docker_model_path} format={format} imgsz={imgsz_height},{imgsz_width} opset={opset} batch=1"'''
+            # Docker命令，使用更新的镜像名称
+            docker_command = f'''docker run --gpus all --name yolo-export-{conversion_name} --rm --shm-size=4g -v "{data_path}:/workspace/data" -v "{models_path}:/workspace/models" -v "{outputs_path}:/workspace/outputs" lintheyoung/yolov11-trainer:latest bash -c "yolo export model={docker_model_path} format={format} imgsz={imgsz_height},{imgsz_width} opset={opset} batch=1"'''
             
             # 启动进程 - 明确指定UTF-8编码
             process = subprocess.Popen(
@@ -1482,7 +1603,6 @@ def model_conversion_section():
         # ONNX相关参数设置
         st.markdown("### ⚙️ ONNX转换参数")
         
-        # ONNX Opset版本
         # ONNX Opset版本（固定）
         opset_version = 18  # 固定值
         st.info(f"**ONNX Opset版本:** {opset_version} (固定参数，专为MaixCam优化)")
@@ -1529,30 +1649,6 @@ device=0                 # 使用第一个GPU设备
         with col3:
             if st.button("🔄 刷新状态", key="refresh_conversion_status_btn"):
                 st.rerun()
-        
-        # 显示转换过程说明
-        # st.markdown("### 📋 转换流程说明")
-        # st.info(f"""
-        # 转换过程将包括以下步骤：
-        # 1. **数据集图片收集**: 从train和val文件夹收集图片
-        # 2. **图片复制**: 复制200张图片到transfer/export_时间戳/images/目录
-        # 3. **测试图片生成**: 创建test.png/jpg文件
-        # 4. **ONNX转换**: 将pt模型转换为ONNX格式
-        # 5. **模型复制**: 将转换后的ONNX模型复制到transfer目录
-        # 6. **脚本复制**: 复制convert_cvimodel.sh到transfer目录 {'✅' if convert_script_exists else '❌ (脚本不存在)'}
-        # 7. **CviModel转换**: 执行convert_cvimodel.sh生成MaixCam模型 {'✅' if convert_script_exists else '❌ (将跳过)'}
-        # 8. **MUD文件创建**: 自动生成MUD配置文件 {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
-        # 9. **模型打包**: 将.cvimodel和.mud文件打包成ZIP文件 {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
-        
-        # 最终在transfer/export_时间戳/目录下将包含：
-        # - images/ 文件夹 (200张训练图片)
-        # - test.png/jpg (测试图片)
-        # - *.onnx (转换后的ONNX模型文件)
-        # - convert_cvimodel.sh (转换脚本)
-        # - export_时间戳_int8.cvimodel (重命名后的MaixCam模型) {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
-        # - export_时间戳_int8.mud (MUD配置文件) {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
-        # - export_时间戳_int8.zip (完整模型包) {'✅' if convert_script_exists else '❌ (如果脚本存在)'}
-        # """)
         
         # ===== 优化后的转换输出日志显示部分 =====
         st.markdown("### 📄 转换输出日志")
@@ -1783,22 +1879,6 @@ device=0                 # 使用第一个GPU设备
                                     st.write(f"   📁 {subitem}/")
             else:
                 st.info("transfer目录不存在")
-        
-        # 显示使用说明
-        # st.markdown("### 📖 下载文件使用说明")
-        # st.info("""
-        # **完整模型包 (.zip):**
-        # - 包含 .cvimodel 和 .mud 文件
-        # - 包含 200张训练图片和测试图片
-        # - 包含 ONNX 模型和转换脚本
-        # - 推荐下载，开箱即用
-        
-        # **MaixCam 部署:**
-        # 1. 下载完整模型包 (.zip)
-        # 2. 解压后将 .cvimodel 和 .mud 文件复制到 MaixCam 设备
-        # 3. 使用 MaixCam SDK 加载模型进行推理
-        # 4. 参考包内的图片进行测试
-        # """)
 
 def main():
     st.set_page_config(
@@ -1932,7 +2012,7 @@ label_smoothing=0.0      # 标签平滑
     -v "{data_path}:/workspace/data" \\
     -v "{models_path}:/workspace/models" \\
     -v "{outputs_path}:/workspace/outputs" \\
-    yolov11-trainer:latest bash -c "
+    lintheyoung/yolov11-trainer:latest bash -c "
     cd /workspace/models && yolo train \\
     data=/workspace/data/data.yaml \\
     model={selected_model} \\
@@ -2022,50 +2102,20 @@ label_smoothing=0.0      # 标签平滑
     
     with tab5:
         model_conversion_section()
-    
-    # # 底部信息
-    # st.markdown("---")
-    # st.markdown("💡 **使用说明:**")
-    # st.markdown("1. 在 '数据集管理' 标签页上传ZIP文件或提供下载URL")
-    # st.markdown("2. 系统会自动查找并验证data.yaml配置文件")
-    # st.markdown("3. 在 '训练控制' 标签页设置训练参数")
-    # st.markdown("4. 确保 Docker 镜像 `yolov11-trainer:latest` 已构建")
-    # st.markdown("5. 在 '训练控制' 标签页启动训练过程")
-    # st.markdown("6. 在 '实时输出' 标签页查看训练进度")
-    # st.markdown("7. 训练完成后在 '训练结果' 标签页查看结果")
-    # st.markdown("8. 在 '转换pt为MaixCam模型' 标签页将训练好的模型转换并打包")
-    # st.markdown("9. 转换完成后可直接下载完整的.zip模型包用于MaixCam设备")
-    
-    # st.markdown("### 📋 数据集格式要求:")
-    # st.markdown("- 数据集应为ZIP格式")
-    # st.markdown("- 包含标准的YOLO格式目录结构")
-    # st.markdown("- 必须包含data.yaml配置文件")
-    # st.markdown("- 支持的配置字段: train, val, names, nc(可选)")
-    
-    # st.markdown("### 🔄 模型转换功能:")
-    # st.markdown("- 自动建立PT文件与数据集的映射关系")
-    # st.markdown("- 从训练数据集中复制200张图片供测试")
-    # st.markdown("- 创建测试图片文件")
-    # st.markdown("- 转换PT模型为ONNX格式")
-    # st.markdown("- 复制convert_cvimodel.sh脚本并执行CviModel转换")
-    # st.markdown("- 自动重命名.cvimodel文件为export_时间戳_int8.cvimodel格式")
-    # st.markdown("- **新增：自动生成.mud配置文件，包含模型配置和数据集标签**")
-    # st.markdown("- **新增：将.cvimodel和.mud文件打包成完整的.zip模型包**")
-    # st.markdown("- 提供直接下载链接，支持MaixCam直接使用")
-    
-    # st.markdown("### 📝 MaixCam转换要求:")
-    # st.markdown("- 需要在应用根目录放置 `convert_cvimodel.sh` 脚本")
-    # st.markdown("- 需要 `lintheyoung/tpuc_dev_env_build` Docker镜像")
-    # st.markdown("- 生成的 `.cvimodel` 文件专为MaixCam优化，性能更佳")
-    # st.markdown("- **新增：自动生成的.mud文件包含完整的模型配置信息**")
-    # st.markdown("- **新增：完整的.zip模型包包含.cvimodel和.mud文件，即下即用**")
-    # st.markdown("- 转换完成后文件会自动重命名并可直接下载完整包")
-    
-    # st.markdown("### 📦 MUD文件说明:")
-    # st.markdown("- MUD文件是MaixCam模型的配置文件")
-    # st.markdown("- 包含模型类型、输入格式、预处理参数等信息")
-    # st.markdown("- 自动从data.yaml中提取类别标签信息")
-    # st.markdown("- 与.cvimodel文件配套使用，简化MaixCam部署流程")
+
 
 if __name__ == "__main__":
+    # 在应用启动时进行环境初始化
+    print("正在启动MaixCam YOLOv11训练平台...")
+    
+    # 初始化环境检查（在后台线程中运行，避免阻塞Streamlit启动）
+    def background_env_check():
+        initialize_environment()
+    
+    # 创建后台线程进行环境检查
+    env_check_thread = threading.Thread(target=background_env_check)
+    env_check_thread.daemon = True
+    env_check_thread.start()
+    
+    # 启动Streamlit应用
     main()
