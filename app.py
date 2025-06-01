@@ -8,6 +8,9 @@ import zipfile
 import requests
 import shutil
 import yaml
+import platform
+import signal
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -28,6 +31,91 @@ REQUIRED_DOCKER_IMAGES = [
     "lintheyoung/yolov11-trainer:latest",  # 用于训练和ONNX转换
     "lintheyoung/tpuc_dev_env_build"       # 用于CviModel转换
 ]
+
+# ==================== 跨平台兼容性工具函数 ====================
+
+def get_platform_info():
+    """获取平台信息"""
+    return {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "is_windows": platform.system() == "Windows",
+        "is_linux": platform.system() == "Linux",
+        "is_macos": platform.system() == "Darwin"
+    }
+
+def normalize_path_for_docker(local_path):
+    """将本地路径转换为Docker挂载格式"""
+    abs_path = os.path.abspath(local_path)
+    
+    if platform.system() == "Windows":
+        # Windows: C:\path -> /c/path
+        if len(abs_path) > 1 and abs_path[1] == ':':
+            drive = abs_path[0].lower()
+            path = abs_path[2:].replace('\\', '/')
+            return f"/{drive}{path}"
+    
+    # Linux/Mac: 直接使用，但确保使用正斜杠
+    return abs_path.replace(os.sep, "/")
+
+def safe_chmod(file_path, mode=0o755):
+    """安全的chmod操作，跨平台兼容"""
+    if platform.system() != "Windows":
+        try:
+            os.chmod(file_path, mode)
+            return True
+        except OSError as e:
+            print(f"⚠️ 设置文件权限失败: {e}")
+            return False
+    return True  # Windows下跳过chmod
+
+def terminate_process_cross_platform(pid):
+    """跨平台进程终止"""
+    if not pid:
+        return False
+        
+    try:
+        if platform.system() == "Windows":
+            # Windows使用taskkill
+            result = subprocess.run(f"taskkill /F /PID {pid}", 
+                                  shell=True, check=False, 
+                                  capture_output=True, text=True)
+            return result.returncode == 0
+        else:
+            # Linux/Mac使用信号
+            try:
+                os.kill(pid, signal.SIGTERM)  # 先尝试温和终止
+                time.sleep(2)
+                # 检查进程是否还存在
+                os.kill(pid, 0)  # 检查进程是否存在
+                os.kill(pid, signal.SIGKILL)  # 强制终止
+            except ProcessLookupError:
+                pass  # 进程已经终止
+            return True
+    except Exception as e:
+        print(f"终止进程失败: {e}")
+        return False
+
+def create_directory_safe(directory_path):
+    """安全创建目录，处理权限问题"""
+    try:
+        os.makedirs(directory_path, exist_ok=True)
+        # 在Linux下设置合适的权限
+        if platform.system() != "Windows":
+            try:
+                os.chmod(directory_path, 0o755)
+            except OSError:
+                pass
+        return True
+    except Exception as e:
+        print(f"创建目录失败 {directory_path}: {e}")
+        return False
+
+def get_temp_directory():
+    """获取跨平台临时目录"""
+    return tempfile.gettempdir()
+
+# ==================== Docker环境检查函数 ====================
 
 def check_docker_environment():
     """检查Docker环境是否可用"""
@@ -53,6 +141,11 @@ def check_docker_environment():
             return False
         
         print("✅ Docker服务正在运行")
+        
+        # 检查Docker权限（主要针对Linux）
+        if not check_docker_permissions():
+            return False
+            
         return True
         
     except subprocess.TimeoutExpired:
@@ -63,6 +156,47 @@ def check_docker_environment():
         return False
     except Exception as e:
         print(f"❌ 检查Docker环境时发生错误: {str(e)}")
+        return False
+
+def check_docker_permissions():
+    """检查Docker权限（Linux特有问题）"""
+    try:
+        result = subprocess.run(['docker', 'ps'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            if "permission denied" in result.stderr.lower():
+                print("❌ Docker权限不足，请运行:")
+                print("  sudo usermod -aG docker $USER")
+                print("  然后重新登录或重启系统")
+                print("  或者使用sudo运行此应用")
+                return False
+            else:
+                print(f"❌ Docker命令执行失败: {result.stderr}")
+                return False
+        
+        print("✅ Docker权限检查通过")
+        return True
+    except Exception as e:
+        print(f"❌ 检查Docker权限时发生错误: {e}")
+        return False
+
+def check_nvidia_docker():
+    """检查NVIDIA Docker支持"""
+    try:
+        print("🔍 检查NVIDIA Docker支持...")
+        result = subprocess.run([
+            'docker', 'run', '--rm', '--gpus', 'all', 
+            'nvidia/cuda:11.8-base-ubuntu20.04', 'nvidia-smi'
+        ], capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            print("✅ NVIDIA Docker支持正常")
+            return True
+        else:
+            print("⚠️ NVIDIA Docker支持不可用，将使用CPU训练")
+            return False
+    except Exception as e:
+        print(f"⚠️ 检查NVIDIA Docker时出错: {e}")
         return False
 
 def check_docker_image_exists(image_name):
@@ -124,15 +258,28 @@ def check_and_pull_docker_images():
 
 def initialize_environment():
     """初始化环境检查"""
+    platform_info = get_platform_info()
+    
     print("=" * 50)
     print("🚀 MaixCam YOLOv11训练平台 - 环境初始化")
     print("=" * 50)
+    print(f"🖥️  操作系统: {platform_info['system']} ({platform_info['machine']})")
+    
+    # 创建必要的目录
+    required_dirs = ["data", "models", "outputs", "transfer"]
+    for dir_name in required_dirs:
+        if not create_directory_safe(dir_name):
+            print(f"❌ 创建目录失败: {dir_name}")
+            return False
     
     # 检查Docker环境
     if not check_docker_environment():
         print("❌ Docker环境检查失败，程序可能无法正常运行")
-        print("请确保Docker已安装并正在运行")
         return False
+    
+    # Linux下检查NVIDIA Docker（可选）
+    if platform_info['is_linux']:
+        check_nvidia_docker()
     
     # 检查并下载Docker镜像
     if not check_and_pull_docker_images():
@@ -142,6 +289,8 @@ def initialize_environment():
     print("✅ 环境初始化完成，程序已准备就绪")
     print("=" * 50)
     return True
+
+# ==================== 状态管理函数 ====================
 
 def init_status():
     """初始化状态"""
@@ -179,6 +328,8 @@ def set_status(status, pid=None, current_run=None):
         
     with open(STATUS_FILE, 'w', encoding='utf-8') as f:
         json.dump(status_data, f)
+
+# ==================== 数据集管理函数 ====================
 
 def save_dataset_info(info):
     """保存数据集信息"""
@@ -266,6 +417,8 @@ def get_dataset_labels():
         print(f"获取数据集标签失败: {e}")
         return []
 
+# ==================== MUD文件和模型包处理函数 ====================
+
 def create_mud_file(cvimodel_path, conversion_name):
     """创建MUD配置文件"""
     try:
@@ -331,6 +484,8 @@ def create_model_package_zip(cvimodel_path, mud_path, conversion_name):
     except Exception as e:
         return None, f"❌ 创建模型包失败: {str(e)}"
 
+# ==================== 图片处理函数 ====================
+
 def collect_images_from_dataset(images_path, target_count=200):
     """从数据集的images目录中收集图片"""
     image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.webp']
@@ -359,7 +514,7 @@ def copy_images_to_transfer(images_list, target_dir, target_count=200):
     try:
         # 创建images目录
         images_dir = os.path.join(target_dir, "images")
-        os.makedirs(images_dir, exist_ok=True)
+        create_directory_safe(images_dir)
         
         copied_images = []
         
@@ -402,6 +557,8 @@ def copy_images_to_transfer(images_list, target_dir, target_count=200):
     except Exception as e:
         print(f"复制图片失败: {e}")
         return [], None
+
+# ==================== 数据集下载和处理函数 ====================
 
 def download_file(url, local_filename, progress_placeholder=None):
     """下载文件"""
@@ -470,10 +627,10 @@ def process_uploaded_dataset(uploaded_file):
     """处理上传的数据集"""
     try:
         # 创建临时目录
-        temp_dir = "temp_dataset"
+        temp_dir = os.path.join(get_temp_directory(), "dataset_upload")
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-        os.makedirs(temp_dir)
+        create_directory_safe(temp_dir)
         
         # 保存上传的文件
         zip_path = os.path.join(temp_dir, "dataset.zip")
@@ -529,10 +686,10 @@ def process_url_dataset(url):
     """处理URL下载的数据集"""
     try:
         # 创建临时目录
-        temp_dir = "temp_dataset"
+        temp_dir = os.path.join(get_temp_directory(), "dataset_download")
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-        os.makedirs(temp_dir)
+        create_directory_safe(temp_dir)
         
         # 下载文件
         parsed_url = urlparse(url)
@@ -612,6 +769,8 @@ def process_url_dataset(url):
     except Exception as e:
         return False, f"处理URL数据集失败: {str(e)}"
 
+# ==================== 输出处理函数 ====================
+
 def read_output():
     """读取输出"""
     try:
@@ -647,6 +806,8 @@ def clear_conversion_output():
             f.write("")
     except Exception as e:
         print(f"清空转换输出文件失败: {e}")
+
+# ==================== CviModel处理函数 ====================
 
 def find_and_move_cvimodel(transfer_dir, conversion_name, selected_model_name):
     """在workspace目录中查找.cvimodel文件并移动到顶层目录"""
@@ -703,16 +864,68 @@ def find_and_move_cvimodel(transfer_dir, conversion_name, selected_model_name):
     except Exception as e:
         return None, None, None, f"❌ 移动.cvimodel文件失败: {str(e)}"
 
-def get_download_link(file_path, file_name):
-    """生成文件下载链接"""
-    try:
-        with open(file_path, "rb") as f:
-            bytes_data = f.read()
-        b64 = base64.b64encode(bytes_data).decode()
-        href = f'<a href="data:application/octet-stream;base64,{b64}" download="{file_name}">📥 下载 {file_name}</a>'
-        return href
-    except Exception as e:
-        return f"生成下载链接失败: {str(e)}"
+# ==================== Docker命令构建函数 ====================
+
+def build_docker_training_command(model, epochs, imgsz, run_name):
+    """构建Docker训练命令"""
+    # 获取当前目录的绝对路径
+    current_dir = os.getcwd()
+    data_path = os.path.join(current_dir, "data")
+    models_path = os.path.join(current_dir, "models")
+    outputs_path = os.path.join(current_dir, "outputs")
+    
+    # 确保目录存在
+    for path in [data_path, models_path, outputs_path]:
+        create_directory_safe(path)
+    
+    # 转换为Docker挂载格式
+    docker_data_path = normalize_path_for_docker(data_path)
+    docker_models_path = normalize_path_for_docker(models_path)
+    docker_outputs_path = normalize_path_for_docker(outputs_path)
+    
+    # 构建Docker命令
+    docker_command = f'''docker run --gpus all --name yolov11-{run_name} --rm --shm-size=4g -v "{docker_data_path}:/workspace/data" -v "{docker_models_path}:/workspace/models" -v "{docker_outputs_path}:/workspace/outputs" lintheyoung/yolov11-trainer:latest bash -c "cd /workspace/models && yolo train data=/workspace/data/data.yaml model={model} epochs={epochs} imgsz={imgsz} project=/workspace/outputs name={run_name}"'''
+    
+    return docker_command, data_path, models_path, outputs_path
+
+def build_docker_conversion_command(model_path, format, imgsz_height, imgsz_width, opset, conversion_name):
+    """构建Docker转换命令"""
+    # 获取当前目录的绝对路径
+    current_dir = os.getcwd()
+    data_path = os.path.join(current_dir, "data")
+    models_path = os.path.join(current_dir, "models")
+    outputs_path = os.path.join(current_dir, "outputs")
+    
+    # 确保目录存在
+    for path in [data_path, models_path, outputs_path]:
+        create_directory_safe(path)
+    
+    # 转换模型路径为Docker容器内路径
+    docker_model_path = model_path.replace(outputs_path, "/workspace/outputs")
+    docker_model_path = docker_model_path.replace(os.sep, "/")
+    
+    # 转换为Docker挂载格式
+    docker_data_path = normalize_path_for_docker(data_path)
+    docker_models_path = normalize_path_for_docker(models_path)
+    docker_outputs_path = normalize_path_for_docker(outputs_path)
+    
+    # 构建Docker命令
+    docker_command = f'''docker run --gpus all --name yolo-export-{conversion_name} --rm --shm-size=4g -v "{docker_data_path}:/workspace/data" -v "{docker_models_path}:/workspace/models" -v "{docker_outputs_path}:/workspace/outputs" lintheyoung/yolov11-trainer:latest bash -c "yolo export model={docker_model_path} format={format} imgsz={imgsz_height},{imgsz_width} opset={opset} batch=1"'''
+    
+    return docker_command
+
+def build_docker_cvimodel_command(transfer_dir):
+    """构建CviModel转换命令"""
+    # 获取transfer目录的绝对路径
+    abs_transfer_dir = os.path.abspath(transfer_dir)
+    docker_transfer_path = normalize_path_for_docker(abs_transfer_dir)
+    
+    # 构建Docker命令
+    docker_command = f'''docker run --rm -it -v "{docker_transfer_path}:/workspace" lintheyoung/tpuc_dev_env_build bash -c "cd /workspace && ./convert_cvimodel.sh"'''
+    
+    return docker_command
+
+# ==================== 训练和转换函数 ====================
 
 def run_docker_training(model, epochs, imgsz):
     """运行Docker训练"""
@@ -725,16 +938,10 @@ def run_docker_training(model, epochs, imgsz):
             set_status("running", current_run=run_name)
             clear_output()
             
-            # 获取当前目录的绝对路径
-            current_dir = os.getcwd()
-            data_path = os.path.join(current_dir, "data")
-            models_path = os.path.join(current_dir, "models")
-            outputs_path = os.path.join(current_dir, "outputs")
-            
-            # 确保目录存在
-            os.makedirs(data_path, exist_ok=True)
-            os.makedirs(models_path, exist_ok=True)
-            os.makedirs(outputs_path, exist_ok=True)
+            # 构建Docker命令
+            docker_command, data_path, models_path, outputs_path = build_docker_training_command(
+                model, epochs, imgsz, run_name
+            )
             
             # 建立映射关系 - 训练开始前就知道pt文件的最终位置
             future_weights_dir = os.path.join(outputs_path, run_name, "weights")
@@ -744,9 +951,6 @@ def run_docker_training(model, epochs, imgsz):
             # 保存映射关系
             save_pt_dataset_mapping(future_best_pt, data_path, run_name)
             save_pt_dataset_mapping(future_last_pt, data_path, run_name)
-            
-            # Docker命令，使用更新的镜像名称
-            docker_command = f'''docker run --gpus all --name yolov11-{run_name} --rm --shm-size=4g -v "{data_path}:/workspace/data" -v "{models_path}:/workspace/models" -v "{outputs_path}:/workspace/outputs" lintheyoung/yolov11-trainer:latest bash -c "cd /workspace/models && yolo train data=/workspace/data/data.yaml model={model} epochs={epochs} imgsz={imgsz} project=/workspace/outputs name={run_name}"'''
             
             # 启动进程 - 明确指定UTF-8编码
             process = subprocess.Popen(
@@ -820,7 +1024,7 @@ def run_model_conversion(model_path, format="onnx", opset=18):
             
             # 创建transfer目录
             transfer_dir = os.path.join("transfer", conversion_name)
-            os.makedirs(transfer_dir, exist_ok=True)
+            create_directory_safe(transfer_dir)
             
             with open(CONVERSION_OUTPUT_FILE, 'w', encoding='utf-8', errors='replace') as f:
                 f.write(f"开始模型转换流程 - {conversion_name}\n")
@@ -886,27 +1090,14 @@ def run_model_conversion(model_path, format="onnx", opset=18):
                 f.write("=== ONNX模型转换 ===\n")
                 f.flush()
             
-            # 获取当前目录的绝对路径
-            current_dir = os.getcwd()
-            data_path = os.path.join(current_dir, "data")
-            models_path = os.path.join(current_dir, "models")
-            outputs_path = os.path.join(current_dir, "outputs")
-            
-            # 确保目录存在
-            os.makedirs(data_path, exist_ok=True)
-            os.makedirs(models_path, exist_ok=True)
-            os.makedirs(outputs_path, exist_ok=True)
-            
-            # 确保模型路径正确 (相对路径转为docker容器内路径)
-            docker_model_path = model_path.replace(outputs_path, "/workspace/outputs").replace("\\", "/")
-
-            # 定义期望的图像尺寸
-            # 符合MaixCam的尺寸
+            # 定义期望的图像尺寸（符合MaixCam的尺寸）
             imgsz_height = 224
             imgsz_width = 320
             
-            # Docker命令，使用更新的镜像名称
-            docker_command = f'''docker run --gpus all --name yolo-export-{conversion_name} --rm --shm-size=4g -v "{data_path}:/workspace/data" -v "{models_path}:/workspace/models" -v "{outputs_path}:/workspace/outputs" lintheyoung/yolov11-trainer:latest bash -c "yolo export model={docker_model_path} format={format} imgsz={imgsz_height},{imgsz_width} opset={opset} batch=1"'''
+            # 构建Docker命令
+            docker_command = build_docker_conversion_command(
+                model_path, format, imgsz_height, imgsz_width, opset, conversion_name
+            )
             
             # 启动进程 - 明确指定UTF-8编码
             process = subprocess.Popen(
@@ -964,7 +1155,7 @@ def run_model_conversion(model_path, format="onnx", opset=18):
                         
                         f.write(f"\n✅ ONNX转换和文件复制完成: {transfer_dir}\n")
                         
-                        # 新增：复制convert_cvimodel.sh文件
+                        # 复制convert_cvimodel.sh文件
                         f.write("\n=== 复制转换脚本 ===\n")
                         f.flush()
                         
@@ -973,25 +1164,19 @@ def run_model_conversion(model_path, format="onnx", opset=18):
                             target_script_path = os.path.join(transfer_dir, "convert_cvimodel.sh")
                             shutil.copy2(convert_script_path, target_script_path)
                             
-                            # 确保脚本有执行权限（Linux/Mac）
-                            try:
-                                os.chmod(target_script_path, 0o755)
-                            except:
-                                pass  # Windows系统可能不支持chmod
+                            # 设置执行权限
+                            safe_chmod(target_script_path, 0o755)
                             
                             f.write(f"✅ 已复制转换脚本: {convert_script_path}\n")
                             f.flush()
                             
-                            # 新增：执行CviModel转换
+                            # 执行CviModel转换
                             f.write("\n=== 执行CviModel转换 ===\n")
                             f.write(f"切换到目录: {transfer_dir}\n")
                             f.flush()
                             
-                            # 获取transfer目录的绝对路径
-                            abs_transfer_dir = os.path.abspath(transfer_dir)
-                            
                             # 构建docker命令
-                            cvi_docker_command = f'''docker run --rm -it -v "{abs_transfer_dir}:/workspace" lintheyoung/tpuc_dev_env_build bash -c "cd /workspace && ./convert_cvimodel.sh"'''
+                            cvi_docker_command = build_docker_cvimodel_command(transfer_dir)
                             
                             f.write(f"执行命令:\n{cvi_docker_command}\n\n")
                             f.flush()
@@ -1006,7 +1191,7 @@ def run_model_conversion(model_path, format="onnx", opset=18):
                                 encoding='utf-8',
                                 errors='replace',
                                 bufsize=1,
-                                cwd=abs_transfer_dir  # 设置工作目录
+                                cwd=os.path.abspath(transfer_dir)  # 设置工作目录
                             )
                             
                             # 实时读取CviModel转换输出
@@ -1031,7 +1216,7 @@ def run_model_conversion(model_path, format="onnx", opset=18):
                             if cvi_return_code == 0:
                                 f.write("✅ CviModel转换完成!\n")
                                 
-                                # 新增：查找并移动.cvimodel文件，同时创建MUD文件和ZIP包
+                                # 查找并移动.cvimodel文件，同时创建MUD文件和ZIP包
                                 f.write("\n=== 处理CviModel文件 ===\n")
                                 f.flush()
                                 
@@ -1105,16 +1290,13 @@ def stop_training():
     
     if pid:
         try:
-            # 尝试杀死进程
-            import platform
-            if platform.system() == "Windows":
-                subprocess.run(f"taskkill /F /PID {pid}", shell=True, check=False)
-            else:
-                os.kill(pid, 9)
-            
+            success = terminate_process_cross_platform(pid)
             set_status("stopped")
             with open(OUTPUT_FILE, 'a', encoding='utf-8', errors='replace') as f:
-                f.write(f"\n⏹️ 训练已手动停止 (PID: {pid})")
+                if success:
+                    f.write(f"\n⏹️ 训练已手动停止 (PID: {pid})")
+                else:
+                    f.write(f"\n⚠️ 尝试停止训练 (PID: {pid})，请检查进程状态")
                 
         except Exception as e:
             with open(OUTPUT_FILE, 'a', encoding='utf-8', errors='replace') as f:
@@ -1127,20 +1309,19 @@ def stop_conversion():
     
     if pid:
         try:
-            # 尝试杀死进程
-            import platform
-            if platform.system() == "Windows":
-                subprocess.run(f"taskkill /F /PID {pid}", shell=True, check=False)
-            else:
-                os.kill(pid, 9)
-            
+            success = terminate_process_cross_platform(pid)
             set_status("stopped")
             with open(CONVERSION_OUTPUT_FILE, 'a', encoding='utf-8', errors='replace') as f:
-                f.write(f"\n⏹️ 模型转换已手动停止 (PID: {pid})")
+                if success:
+                    f.write(f"\n⏹️ 模型转换已手动停止 (PID: {pid})")
+                else:
+                    f.write(f"\n⚠️ 尝试停止模型转换 (PID: {pid})，请检查进程状态")
                 
         except Exception as e:
             with open(CONVERSION_OUTPUT_FILE, 'a', encoding='utf-8', errors='replace') as f:
                 f.write(f"\n❌ 停止失败: {str(e)}")
+
+# ==================== 信息提取和显示函数 ====================
 
 def extract_training_info(output_content):
     """提取训练关键信息"""
@@ -1320,6 +1501,8 @@ def display_results():
             st.info("暂无训练结果（可以刷新一下）")
     else:
         st.info("暂无训练结果（可以刷新一下）")
+
+# ==================== UI部分函数 ====================
 
 def dataset_management_section():
     """数据集管理部分"""
@@ -1881,6 +2064,7 @@ device=0                 # 使用第一个GPU设备
                 st.info("transfer目录不存在")
 
 def main():
+    """主应用程序"""
     st.set_page_config(
         page_title="MaixCam的YOLOv11训练平台",
         page_icon="🧪",
@@ -1889,6 +2073,12 @@ def main():
     
     st.title("🧪 MaixCam的YOLOv11训练平台")
     st.markdown("支持数据集上传/下载、参数设置、模型转换和MaixCam CviModel生成的增强版训练平台")
+    
+    # 显示平台信息
+    platform_info = get_platform_info()
+    st.sidebar.markdown(f"**系统信息:**")
+    st.sidebar.info(f"操作系统: {platform_info['system']}")
+    st.sidebar.info(f"架构: {platform_info['machine']}")
     
     # 初始化
     init_status()
@@ -1999,28 +2189,13 @@ label_smoothing=0.0      # 标签平滑
         
         # 显示Docker命令
         with st.expander("🔍 查看执行的Docker命令"):
-            current_dir = os.getcwd()
-            data_path = os.path.join(current_dir, "data")
-            models_path = os.path.join(current_dir, "models")
-            outputs_path = os.path.join(current_dir, "outputs")
-            
             # 使用当前选择的参数生成命令预览
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             run_name = f"train_{timestamp}"
             
-            docker_cmd = f'''docker run --gpus all --name yolov11-{run_name} --rm --shm-size=4g \\
-    -v "{data_path}:/workspace/data" \\
-    -v "{models_path}:/workspace/models" \\
-    -v "{outputs_path}:/workspace/outputs" \\
-    lintheyoung/yolov11-trainer:latest bash -c "
-    cd /workspace/models && yolo train \\
-    data=/workspace/data/data.yaml \\
-    model={selected_model} \\
-    epochs={epochs} \\
-    imgsz={selected_img_size} \\
-    project=/workspace/outputs \\
-    name={run_name}
-"'''
+            docker_cmd, _, _, _ = build_docker_training_command(
+                selected_model, epochs, selected_img_size, run_name
+            )
             st.code(docker_cmd, language='bash')
     
     with tab3:
@@ -2108,14 +2283,24 @@ if __name__ == "__main__":
     # 在应用启动时进行环境初始化
     print("正在启动MaixCam YOLOv11训练平台...")
     
-    # 初始化环境检查（在后台线程中运行，避免阻塞Streamlit启动）
+    platform_info = get_platform_info()
+    print(f"检测到操作系统: {platform_info['system']} ({platform_info['machine']})")
+    
+    # 在应用启动时进行环境初始化（在后台线程中运行，避免阻塞Streamlit启动）
     def background_env_check():
-        initialize_environment()
+        """后台环境检查"""
+        try:
+            initialize_environment()
+        except Exception as e:
+            print(f"环境初始化失败: {e}")
+            print("程序仍将启动，但某些功能可能无法正常工作")
     
     # 创建后台线程进行环境检查
     env_check_thread = threading.Thread(target=background_env_check)
     env_check_thread.daemon = True
     env_check_thread.start()
+    
+    print("🚀 启动Streamlit应用...")
     
     # 启动Streamlit应用
     main()
