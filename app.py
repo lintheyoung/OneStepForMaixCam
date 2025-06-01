@@ -64,15 +64,32 @@ def normalize_path_for_docker(local_path):
     return abs_path.replace(os.sep, "/")
 
 def safe_chmod(file_path, mode=0o755):
-    """安全的chmod操作，跨平台兼容"""
+    """安全的chmod操作，跨平台兼容，增强错误处理"""
     if platform.system() != "Windows":
         try:
+            # 首先检查文件是否存在
+            if not os.path.exists(file_path):
+                print(f"⚠️ 文件不存在，无法设置权限: {file_path}")
+                return False
+                
+            # 尝试设置权限
             os.chmod(file_path, mode)
             return True
-        except OSError as e:
-            print(f"⚠️ 设置文件权限失败: {e}")
+            
+        except PermissionError as e:
+            print(f"⚠️ 权限不足，无法设置文件权限: {file_path} - {e}")
             return False
-    return True  # Windows下跳过chmod
+            
+        except OSError as e:
+            print(f"⚠️ 系统错误，设置文件权限失败: {file_path} - {e}")
+            return False
+            
+        except Exception as e:
+            print(f"⚠️ 未知错误，设置文件权限失败: {file_path} - {e}")
+            return False
+    else:
+        # Windows系统跳过chmod
+        return True
 
 def terminate_process_cross_platform(pid):
     """跨平台进程终止"""
@@ -167,18 +184,34 @@ def create_subprocess_safe(cmd, cwd=None):
         return None
 
 def create_directory_safe(directory_path):
-    """安全创建目录，处理权限问题"""
+    """安全创建目录，处理权限问题，增强版本"""
     try:
+        # 创建目录
         os.makedirs(directory_path, exist_ok=True)
-        # 在Linux下设置合适的权限
+        
+        # 在非Windows系统下设置合适的权限
         if platform.system() != "Windows":
             try:
+                # 尝试设置目录权限为755 (rwxr-xr-x)
                 os.chmod(directory_path, 0o755)
-            except OSError:
-                pass
+            except PermissionError:
+                print(f"⚠️ 权限不足，无法设置目录权限: {directory_path}")
+                # 目录已创建，即使无法设置权限也返回True
+            except OSError as e:
+                print(f"⚠️ 设置目录权限时发生系统错误: {directory_path} - {e}")
+        
         return True
+        
+    except PermissionError as e:
+        print(f"❌ 权限不足，创建目录失败: {directory_path} - {e}")
+        return False
+        
+    except OSError as e:
+        print(f"❌ 系统错误，创建目录失败: {directory_path} - {e}")
+        return False
+        
     except Exception as e:
-        print(f"创建目录失败 {directory_path}: {e}")
+        print(f"❌ 未知错误，创建目录失败: {directory_path} - {e}")
         return False
 
 def get_temp_directory():
@@ -955,8 +988,47 @@ def find_and_move_cvimodel(transfer_dir, conversion_name, selected_model_name):
         source_path = os.path.join(workspace_dir, target_cvimodel)
         target_path = os.path.join(transfer_dir, new_filename)
         
-        # 移动并重命名文件
-        shutil.move(source_path, target_path)
+        # 尝试移动文件，如果权限不足则使用复制
+        try:
+            # 首先尝试修改源文件权限（如果可能的话）
+            try:
+                safe_chmod(source_path, 0o644)
+            except:
+                pass  # 如果无法修改权限，继续尝试移动
+            
+            # 尝试移动文件
+            shutil.move(source_path, target_path)
+            move_method = "移动"
+            
+        except PermissionError:
+            # 如果移动失败，尝试复制文件
+            try:
+                shutil.copy2(source_path, target_path)
+                move_method = "复制"
+                
+                # 尝试删除原文件（如果可能的话）
+                try:
+                    os.remove(source_path)
+                    move_method = "复制并删除原文件"
+                except:
+                    pass  # 如果无法删除原文件，至少复制成功了
+                    
+            except Exception as copy_error:
+                return None, None, None, f"❌ 移动和复制文件都失败: 移动错误-权限不足, 复制错误-{str(copy_error)}"
+        
+        except Exception as move_error:
+            # 如果是其他移动错误，也尝试复制
+            try:
+                shutil.copy2(source_path, target_path)
+                move_method = "复制(移动失败)"
+            except Exception as copy_error:
+                return None, None, None, f"❌ 移动和复制文件都失败: 移动错误-{str(move_error)}, 复制错误-{str(copy_error)}"
+        
+        # 设置目标文件权限
+        try:
+            safe_chmod(target_path, 0o644)
+        except:
+            pass
         
         # 创建MUD文件
         mud_path, mud_message = create_mud_file(target_path, conversion_name)
@@ -967,10 +1039,13 @@ def find_and_move_cvimodel(transfer_dir, conversion_name, selected_model_name):
         if mud_path:
             zip_path, zip_message = create_model_package_zip(target_path, mud_path, conversion_name)
         
-        return target_path, mud_path, zip_path, f"✅ 成功移动并重命名: {target_cvimodel} -> {new_filename}\n{mud_message}\n{zip_message}"
+        success_message = f"✅ 成功{move_method}: {target_cvimodel} -> {new_filename}\n{mud_message}\n{zip_message}"
+        
+        return target_path, mud_path, zip_path, success_message
         
     except Exception as e:
-        return None, None, None, f"❌ 移动.cvimodel文件失败: {str(e)}"
+        return None, None, None, f"❌ 处理.cvimodel文件失败: {str(e)}"
+
 
 # ==================== Docker命令构建函数 ====================
 
