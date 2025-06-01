@@ -557,7 +557,7 @@ def get_dataset_labels():
         print(f"获取数据集标签失败: {e}")
         return []
 
-# ==================== MUD文件和模型包处理函数 ====================
+# ==================== MUD文件、检测脚本和模型包处理函数 ====================
 
 def create_mud_file(cvimodel_path, conversion_name):
     """创建MUD配置文件"""
@@ -598,8 +598,50 @@ labels = {labels_str}
     except Exception as e:
         return None, f"❌ 创建MUD文件失败: {str(e)}"
 
-def create_model_package_zip(cvimodel_path, mud_path, conversion_name):
-    """创建模型包ZIP文件"""
+def create_detection_script(mud_path, conversion_name):
+    """创建MaixCam检测脚本文件"""
+    try:
+        # 获取mud文件的目录和文件名
+        mud_dir = os.path.dirname(mud_path)
+        mud_filename = os.path.basename(mud_path)
+        
+        # 创建检测脚本路径
+        script_filename = "onestep_yolov11_detect.py"
+        script_path = os.path.join(mud_dir, script_filename)
+        
+        # 生成检测脚本内容，使用相对路径引用模型文件
+        script_content = f'''from maix import camera, display, image, nn, app
+
+# 使用当前目录下的模型文件: {mud_filename}
+detector = nn.YOLO11(model="/root/models/{mud_filename}", dual_buff = True)
+
+cam = camera.Camera(detector.input_width(), detector.input_height(), detector.input_format())
+disp = display.Display()
+
+while not app.need_exit():
+    img = cam.read()
+    objs = detector.detect(img, conf_th = 0.5, iou_th = 0.45)
+    for obj in objs:
+        img.draw_rect(obj.x, obj.y, obj.w, obj.h, color = image.COLOR_RED)
+        msg = f'{{detector.labels[obj.class_id]}}: {{obj.score:.2f}}'
+        img.draw_string(obj.x, obj.y, msg, color = image.COLOR_RED)
+    disp.show(img)
+'''
+        
+        # 写入脚本文件
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(script_content)
+        
+        # 设置执行权限（Linux/Mac）
+        safe_chmod(script_path, 0o755)
+        
+        return script_path, f"✅ 成功创建检测脚本: {script_filename}"
+        
+    except Exception as e:
+        return None, f"❌ 创建检测脚本失败: {str(e)}"
+
+def create_model_package_zip(cvimodel_path, mud_path, script_path, conversion_name):
+    """创建模型包ZIP文件，包含检测脚本"""
     try:
         # 获取文件所在目录
         model_dir = os.path.dirname(cvimodel_path)
@@ -615,6 +657,9 @@ def create_model_package_zip(cvimodel_path, mud_path, conversion_name):
             zipf.write(cvimodel_path, os.path.basename(cvimodel_path))
             # 添加mud文件
             zipf.write(mud_path, os.path.basename(mud_path))
+            # 添加检测脚本文件
+            if script_path and os.path.exists(script_path):
+                zipf.write(script_path, os.path.basename(script_path))
         
         # 获取文件大小
         zip_size = os.path.getsize(zip_path) / (1024 * 1024)  # MB
@@ -951,7 +996,7 @@ def clear_conversion_output():
 # ==================== CviModel处理函数 ====================
 
 def find_and_move_cvimodel(transfer_dir, conversion_name, selected_model_name):
-    """在workspace目录中查找.cvimodel文件并移动到顶层目录"""
+    """在workspace目录中查找.cvimodel文件并移动到顶层目录，同时创建检测脚本"""
     try:
         # 从模型文件名中提取基本名称（例如：best.pt -> best）
         model_base_name = os.path.splitext(os.path.basename(selected_model_name))[0]
@@ -959,7 +1004,7 @@ def find_and_move_cvimodel(transfer_dir, conversion_name, selected_model_name):
         # 查找workspace目录
         workspace_dir = os.path.join(transfer_dir, "workspace")
         if not os.path.exists(workspace_dir):
-            return None, None, None, "未找到workspace目录"
+            return None, None, None, None, "未找到workspace目录"
         
         # 查找.cvimodel文件
         cvimodel_files = []
@@ -968,7 +1013,7 @@ def find_and_move_cvimodel(transfer_dir, conversion_name, selected_model_name):
                 cvimodel_files.append(file)
         
         if not cvimodel_files:
-            return None, None, None, "未找到.cvimodel文件"
+            return None, None, None, None, "未找到.cvimodel文件"
         
         # 寻找匹配的文件（优先查找包含模型基本名称的文件）
         target_cvimodel = None
@@ -1014,7 +1059,7 @@ def find_and_move_cvimodel(transfer_dir, conversion_name, selected_model_name):
                     pass  # 如果无法删除原文件，至少复制成功了
                     
             except Exception as copy_error:
-                return None, None, None, f"❌ 移动和复制文件都失败: 移动错误-权限不足, 复制错误-{str(copy_error)}"
+                return None, None, None, None, f"❌ 移动和复制文件都失败: 移动错误-权限不足, 复制错误-{str(copy_error)}"
         
         except Exception as move_error:
             # 如果是其他移动错误，也尝试复制
@@ -1022,7 +1067,7 @@ def find_and_move_cvimodel(transfer_dir, conversion_name, selected_model_name):
                 shutil.copy2(source_path, target_path)
                 move_method = "复制(移动失败)"
             except Exception as copy_error:
-                return None, None, None, f"❌ 移动和复制文件都失败: 移动错误-{str(move_error)}, 复制错误-{str(copy_error)}"
+                return None, None, None, None, f"❌ 移动和复制文件都失败: 移动错误-{str(move_error)}, 复制错误-{str(copy_error)}"
         
         # 设置目标文件权限
         try:
@@ -1033,18 +1078,24 @@ def find_and_move_cvimodel(transfer_dir, conversion_name, selected_model_name):
         # 创建MUD文件
         mud_path, mud_message = create_mud_file(target_path, conversion_name)
         
+        # 创建检测脚本文件
+        script_path = None
+        script_message = ""
+        if mud_path:
+            script_path, script_message = create_detection_script(mud_path, conversion_name)
+        
         # 创建模型包ZIP文件
         zip_path = None
         zip_message = ""
         if mud_path:
-            zip_path, zip_message = create_model_package_zip(target_path, mud_path, conversion_name)
+            zip_path, zip_message = create_model_package_zip(target_path, mud_path, script_path, conversion_name)
         
-        success_message = f"✅ 成功{move_method}: {target_cvimodel} -> {new_filename}\n{mud_message}\n{zip_message}"
+        success_message = f"✅ 成功{move_method}: {target_cvimodel} -> {new_filename}\n{mud_message}\n{script_message}\n{zip_message}"
         
-        return target_path, mud_path, zip_path, success_message
+        return target_path, mud_path, script_path, zip_path, success_message
         
     except Exception as e:
-        return None, None, None, f"❌ 处理.cvimodel文件失败: {str(e)}"
+        return None, None, None, None, f"❌ 处理.cvimodel文件失败: {str(e)}"
 
 
 # ==================== Docker命令构建函数 ====================
@@ -1405,13 +1456,13 @@ def run_model_conversion(model_path, format="onnx", opset=18):
                                 if cvi_return_code == 0:
                                     f.write("✅ CviModel转换完成!\n")
                                     
-                                    # 查找并移动.cvimodel文件，同时创建MUD文件和ZIP包
+                                    # 查找并移动.cvimodel文件，同时创建MUD文件、检测脚本和ZIP包
                                     f.write("\n=== 处理CviModel文件 ===\n")
                                     f.flush()
                                     
                                     # 从模型路径中提取文件名
                                     selected_model_name = os.path.basename(model_path)
-                                    moved_file_path, mud_file_path, zip_file_path, move_message = find_and_move_cvimodel(
+                                    moved_file_path, mud_file_path, script_file_path, zip_file_path, move_message = find_and_move_cvimodel(
                                         transfer_dir, conversion_name, selected_model_name
                                     )
                                     
@@ -1424,6 +1475,10 @@ def run_model_conversion(model_path, format="onnx", opset=18):
                                     if mud_file_path:
                                         f.write(f"MUD配置文件路径: {mud_file_path}\n")
                                         f.write(f"MUD文件大小: {os.path.getsize(mud_file_path) / 1024:.2f} KB\n")
+                                    
+                                    if script_file_path:
+                                        f.write(f"检测脚本文件路径: {script_file_path}\n")
+                                        f.write(f"脚本文件大小: {os.path.getsize(script_file_path) / 1024:.2f} KB\n")
                                     
                                     if zip_file_path:
                                         f.write(f"模型包ZIP路径: {zip_file_path}\n")
@@ -1441,6 +1496,9 @@ def run_model_conversion(model_path, format="onnx", opset=18):
                                     if mud_file_path:
                                         final_mud_filename = os.path.basename(mud_file_path)
                                         f.write(f"  - {final_mud_filename} (MUD配置文件) 📋\n")
+                                    if script_file_path:
+                                        final_script_filename = os.path.basename(script_file_path)
+                                        f.write(f"  - {final_script_filename} (MaixCam检测脚本) 🐍\n")
                                     if zip_file_path:
                                         final_zip_filename = os.path.basename(zip_file_path)
                                         f.write(f"  - {final_zip_filename} (完整模型包) 📦\n")
@@ -1793,6 +1851,7 @@ def extract_conversion_info(output_content):
         "onnx_conversion_status": None,
         "cvimodel_conversion_status": None,
         "mud_file_created": None,
+        "script_file_created": None,  # 新增：检测脚本创建状态
         "zip_package_created": None
     }
     
@@ -1873,6 +1932,12 @@ def extract_conversion_info(output_content):
             info["mud_file_created"] = "成功"
         elif "创建MUD文件失败" in line:
             info["mud_file_created"] = "失败"
+        
+        # 检测脚本创建状态
+        if "成功创建检测脚本" in line:
+            info["script_file_created"] = "成功"
+        elif "创建检测脚本失败" in line:
+            info["script_file_created"] = "失败"
         
         # ZIP包创建状态
         if "成功创建模型包" in line:
@@ -2046,11 +2111,12 @@ device=0                 # 使用第一个GPU设备
             
             # 显示转换状态摘要
             if any([conversion_info["images_collected"], conversion_info["onnx_conversion_status"], 
-                   conversion_info["cvimodel_conversion_status"], conversion_info["mud_file_created"]]):
+                   conversion_info["cvimodel_conversion_status"], conversion_info["mud_file_created"],
+                   conversion_info["script_file_created"]]):
                 
                 st.markdown("**🎯 转换状态摘要:**")
                 
-                status_cols = st.columns(4)
+                status_cols = st.columns(5)  # 增加一列用于显示脚本状态
                 
                 with status_cols[0]:
                     if conversion_info["images_collected"]:
@@ -2078,6 +2144,13 @@ device=0                 # 使用第一个GPU设备
                             st.success(f"📋 MUD: {conversion_info['mud_file_created']}")
                         else:
                             st.error(f"📋 MUD: {conversion_info['mud_file_created']}")
+                
+                with status_cols[4]:
+                    if conversion_info["script_file_created"]:
+                        if conversion_info["script_file_created"] == "成功":
+                            st.success(f"🐍 脚本: {conversion_info['script_file_created']}")
+                        else:
+                            st.error(f"🐍 脚本: {conversion_info['script_file_created']}")
                     if conversion_info["zip_package_created"]:
                         if conversion_info["zip_package_created"] == "成功":
                             st.success(f"📦 ZIP: {conversion_info['zip_package_created']}")
@@ -2128,7 +2201,7 @@ device=0                 # 使用第一个GPU设备
                 st.rerun()
                 
         else:
-            st.info("暂无转换日志")
+            st.info("暂无转换日志（可以刷新一下浏览器）")
         
         # ===== 新增：显示转换结果和下载功能 =====
         st.markdown("### 📦 转换结果和下载")
@@ -2177,7 +2250,14 @@ device=0                 # 使用第一个GPU设备
                                     file_list = zip_ref.namelist()
                                     st.markdown("**ZIP包内容:**")
                                     for file in file_list:
-                                        st.text(f"📄 {file}")
+                                        if file.endswith('.py'):
+                                            st.text(f"🐍 {file}")  # Python脚本用蛇图标
+                                        elif file.endswith('.cvimodel'):
+                                            st.text(f"🎯 {file}")  # CviModel用靶心图标
+                                        elif file.endswith('.mud'):
+                                            st.text(f"📋 {file}")  # MUD文件用剪贴板图标
+                                        else:
+                                            st.text(f"📄 {file}")
                             except Exception as e:
                                 st.error(f"读取ZIP内容失败: {str(e)}")
         
@@ -2212,8 +2292,10 @@ device=0                 # 使用第一个GPU设备
                         except Exception as e:
                             st.error(f"准备下载失败: {str(e)}")
                     
-                    # 检查是否有对应的MUD文件
+                    # 检查是否有对应的MUD文件和脚本文件
                     mud_file_path = cvimodel['path'].replace('.cvimodel', '.mud')
+                    script_file_path = os.path.join(os.path.dirname(cvimodel['path']), 'onestep_yolov11_detect.py')
+                    
                     if os.path.exists(mud_file_path):
                         try:
                             with open(mud_file_path, "rb") as file:
@@ -2229,6 +2311,22 @@ device=0                 # 使用第一个GPU设备
                             )
                         except Exception as e:
                             st.error(f"准备MUD下载失败: {str(e)}")
+                    
+                    if os.path.exists(script_file_path):
+                        try:
+                            with open(script_file_path, "rb") as file:
+                                script_bytes = file.read()
+                            
+                            st.download_button(
+                                label="🐍 下载检测脚本",
+                                data=script_bytes,
+                                file_name="onestep_yolov11_detect.py",
+                                mime="text/plain",
+                                key=f"download_script_{i}",
+                                type="secondary"
+                            )
+                        except Exception as e:
+                            st.error(f"准备脚本下载失败: {str(e)}")
         
         else:
             st.info("💡 暂无转换完成的模型包。完成模型转换后，下载按钮将在此处显示。")
@@ -2246,7 +2344,14 @@ device=0                 # 使用第一个GPU设备
                                 subitem_path = os.path.join(item_path, subitem)
                                 if os.path.isfile(subitem_path):
                                     size_mb = os.path.getsize(subitem_path) / (1024 * 1024)
-                                    st.write(f"   📄 {subitem} ({size_mb:.2f} MB)")
+                                    if subitem.endswith('.py'):
+                                        st.write(f"   🐍 {subitem} ({size_mb:.2f} MB)")
+                                    elif subitem.endswith('.cvimodel'):
+                                        st.write(f"   🎯 {subitem} ({size_mb:.2f} MB)")
+                                    elif subitem.endswith('.mud'):
+                                        st.write(f"   📋 {subitem} ({size_mb:.2f} MB)")
+                                    else:
+                                        st.write(f"   📄 {subitem} ({size_mb:.2f} MB)")
                                 else:
                                     st.write(f"   📁 {subitem}/")
             else:
